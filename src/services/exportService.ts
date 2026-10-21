@@ -21,6 +21,22 @@ import {
   StoragePersistenceError,
 } from '../db/indexedDb';
 import { sortBibEntriesByBibCode } from '../db/repositories';
+import {
+  buildReportFilename,
+  buildValidatedReportDataset,
+  generateExcelReportBuffer,
+  generatePdfReportBytes,
+  ReportFilterOptions,
+  ValidatedReportDataset,
+} from './reportExportService';
+
+export {
+  buildReportFilename,
+  buildValidatedReportDataset,
+  generateExcelReportBuffer,
+  generatePdfReportBytes,
+};
+export type { ReportFilterOptions, ValidatedReportDataset };
 
 export function escapeCsvField(value: string | number | null | undefined): string {
   if (value === null || value === undefined) return '';
@@ -171,6 +187,28 @@ export const ExportService = {
     }
 
     return rows.join('\r\n');
+  },
+
+  async buildValidatedReportDataset(
+    options?: ReportFilterOptions
+  ): Promise<ValidatedReportDataset> {
+    return buildValidatedReportDataset(options);
+  },
+
+  async buildExcelReport(options?: ReportFilterOptions): Promise<{
+    buffer: ArrayBuffer;
+    dataset: ValidatedReportDataset;
+    filename: string;
+  }> {
+    return generateExcelReportBuffer(options);
+  },
+
+  async buildPdfReport(options?: ReportFilterOptions): Promise<{
+    bytes: Uint8Array;
+    dataset: ValidatedReportDataset;
+    filename: string;
+  }> {
+    return generatePdfReportBytes(options);
   },
 
   async buildJsonBackup(): Promise<BackupPayload> {

@@ -14,16 +14,26 @@ interface ExportBackupScreenProps {
   onBackHome: () => void;
 }
 
+function triggerBlobDownload(filename: string, blob: Blob) {
+  if (typeof URL !== 'undefined' && typeof URL.createObjectURL === 'function') {
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = filename;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    setTimeout(() => {
+      if (typeof URL.revokeObjectURL === 'function') {
+        URL.revokeObjectURL(url);
+      }
+    }, 5000);
+  }
+}
+
 function triggerFileDownload(filename: string, content: string, mimeType: string) {
   const blob = new Blob([content], { type: mimeType });
-  const url = URL.createObjectURL(blob);
-  const a = document.createElement('a');
-  a.href = url;
-  a.download = filename;
-  document.body.appendChild(a);
-  a.click();
-  document.body.removeChild(a);
-  setTimeout(() => URL.revokeObjectURL(url), 5000);
+  triggerBlobDownload(filename, blob);
 }
 
 export const ExportBackupScreen: React.FC<ExportBackupScreenProps> = ({
@@ -43,18 +53,19 @@ export const ExportBackupScreen: React.FC<ExportBackupScreenProps> = ({
   const [successMessage, setSuccessMessage] = useState<string | null>(null);
   const [isBusy, setIsBusy] = useState<boolean>(false);
 
+  const getFilterOptions = () =>
+    selectedBatchFilter === 'ALL_EVENTS'
+      ? undefined
+      : selectedBatchFilter === 'ALL_EVENT'
+      ? { eventId: activeEvent.id }
+      : { batchId: selectedBatchFilter };
+
   const handleExportCsv = async (download: boolean) => {
     setErrorMessage(null);
     setSuccessMessage(null);
     setIsBusy(true);
     try {
-      const options =
-        selectedBatchFilter === 'ALL_EVENTS'
-          ? undefined
-          : selectedBatchFilter === 'ALL_EVENT'
-          ? { eventId: activeEvent.id }
-          : { batchId: selectedBatchFilter };
-
+      const options = getFilterOptions();
       const csv = await ExportService.buildCsvString(options);
       setCsvPreviewText(csv);
 
@@ -71,6 +82,54 @@ export const ExportBackupScreen: React.FC<ExportBackupScreenProps> = ({
     } catch (err) {
       setErrorMessage(
         err instanceof Error ? err.message : 'Gagal membuat file CSV.'
+      );
+    } finally {
+      setIsBusy(false);
+    }
+  };
+
+  const handleExportExcel = async () => {
+    setErrorMessage(null);
+    setSuccessMessage(null);
+    setIsBusy(true);
+    try {
+      const options = getFilterOptions();
+      const { buffer, filename, dataset } = await ExportService.buildExcelReport(
+        options
+      );
+      const blob = new Blob([buffer], {
+        type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+      });
+      triggerBlobDownload(filename, blob);
+      setSuccessMessage(
+        `Laporan Excel "${filename}" berhasil diunduh (${dataset.summary.totalValidResults} hasil valid, ${dataset.summary.totalNeedsReview} perlu diperiksa).`
+      );
+    } catch (err) {
+      setErrorMessage(
+        err instanceof Error ? err.message : 'Gagal membuat laporan Excel (.xlsx).'
+      );
+    } finally {
+      setIsBusy(false);
+    }
+  };
+
+  const handleExportPdf = async () => {
+    setErrorMessage(null);
+    setSuccessMessage(null);
+    setIsBusy(true);
+    try {
+      const options = getFilterOptions();
+      const { bytes, filename, dataset } = await ExportService.buildPdfReport(
+        options
+      );
+      const blob = new Blob([bytes], { type: 'application/pdf' });
+      triggerBlobDownload(filename, blob);
+      setSuccessMessage(
+        `Laporan PDF "${filename}" berhasil diunduh (${dataset.summary.totalValidResults} hasil valid, ${dataset.summary.totalNeedsReview} perlu diperiksa).`
+      );
+    } catch (err) {
+      setErrorMessage(
+        err instanceof Error ? err.message : 'Gagal membuat laporan PDF (.pdf).'
       );
     } finally {
       setIsBusy(false);
@@ -189,7 +248,7 @@ export const ExportBackupScreen: React.FC<ExportBackupScreenProps> = ({
       <section className="card warning-card" role="note">
         <h2 className="section-title">Penting: Data Tersimpan Lokal di HP Ini</h2>
         <p>
-          Aplikasi ini <strong>tidak mengirim data ke server atau cloud</strong>. Agar hasil tetap aman apabila HP kehabisan baterai, browser terhapus, atau perangkat rusak, selalu unduh file <strong>Ekspor CSV</strong> dan <strong>Backup JSON</strong> lalu salin/kirim ke luar perangkat ini (mis. ke email, pesan, atau flashdisk).
+          Aplikasi ini <strong>tidak mengirim data ke server atau cloud</strong>. Agar hasil tetap aman apabila HP kehabisan baterai, browser terhapus, atau perangkat rusak, selalu unduh file <strong>Ekspor CSV</strong>, <strong>Laporan Excel/PDF</strong>, dan <strong>Backup JSON</strong> lalu salin/kirim ke luar perangkat ini (mis. ke email, pesan, atau flashdisk).
         </p>
       </section>
 
@@ -205,16 +264,13 @@ export const ExportBackupScreen: React.FC<ExportBackupScreenProps> = ({
         </div>
       )}
 
-      {/* Section 1: Export CSV */}
+      {/* Section 1: Export CSV & Reports (CSV, Excel, PDF) */}
       <section className="card" aria-label="Ekspor CSV Hasil">
-        <h2 className="section-title">1. Ekspor CSV Hasil Lari</h2>
-        <p className="helper-text">
-          Menghasilkan satu baris per peserta/hasil lengkap dengan kegiatan, nomor batch, warna bib, nomor bib, urutan finish, waktu milidetik, waktu terformat (MM:SS.cc), status, dan waktu jam.
-        </p>
+        <h2 className="section-title">1. Ekspor Hasil & Laporan Lari</h2>
 
         <div className="form-group">
           <label htmlFor="csv-scope-select" className="field-label">
-            Cakupan Data CSV:
+            Cakupan Data Laporan / CSV:
           </label>
           <select
             id="csv-scope-select"
@@ -234,23 +290,29 @@ export const ExportBackupScreen: React.FC<ExportBackupScreenProps> = ({
           </select>
         </div>
 
-        <div className="export-btn-row">
-          <button
-            type="button"
-            className="btn btn--primary btn--large"
-            disabled={isBusy}
-            onClick={() => void handleExportCsv(true)}
-          >
-            Ekspor CSV (Unduh File)
-          </button>
-          <button
-            type="button"
-            className="btn btn--secondary"
-            disabled={isBusy}
-            onClick={() => void handleExportCsv(false)}
-          >
-            Tampilkan Pratinjau CSV
-          </button>
+        {/* Option 1: CSV */}
+        <div className="export-method-block">
+          <p className="helper-text">
+            <strong>CSV:</strong> data tabel untuk spreadsheet atau pemrosesan lanjutan.
+          </p>
+          <div className="export-btn-row">
+            <button
+              type="button"
+              className="btn btn--primary btn--large"
+              disabled={isBusy}
+              onClick={() => void handleExportCsv(true)}
+            >
+              Ekspor CSV
+            </button>
+            <button
+              type="button"
+              className="btn btn--secondary"
+              disabled={isBusy}
+              onClick={() => void handleExportCsv(false)}
+            >
+              Tampilkan Pratinjau CSV
+            </button>
+          </div>
         </div>
 
         {csvPreviewText && (
@@ -267,13 +329,47 @@ export const ExportBackupScreen: React.FC<ExportBackupScreenProps> = ({
             />
           </div>
         )}
+
+        {/* Option 3: Excel (.xlsx) */}
+        <div className="export-method-block" style={{ marginTop: '0.85rem' }}>
+          <p className="helper-text">
+            <strong>Excel:</strong> laporan hasil yang mudah dibaca dan dianalisis.
+          </p>
+          <div className="export-btn-row">
+            <button
+              type="button"
+              className="btn btn--primary btn--large"
+              disabled={isBusy}
+              onClick={() => void handleExportExcel()}
+            >
+              Unduh Laporan Excel (.xlsx)
+            </button>
+          </div>
+        </div>
+
+        {/* Option 4: PDF (.pdf) */}
+        <div className="export-method-block" style={{ marginTop: '0.85rem' }}>
+          <p className="helper-text">
+            <strong>PDF:</strong> laporan siap dibagikan atau dicetak.
+          </p>
+          <div className="export-btn-row">
+            <button
+              type="button"
+              className="btn btn--primary btn--large"
+              disabled={isBusy}
+              onClick={() => void handleExportPdf()}
+            >
+              Unduh Laporan PDF (.pdf)
+            </button>
+          </div>
+        </div>
       </section>
 
       {/* Section 2: Export JSON Backup */}
       <section className="card" aria-label="Backup JSON Lengkap">
-        <h2 className="section-title">2. Backup JSON Lengkap</h2>
+        <h2 className="section-title">2. Backup Lengkap (JSON)</h2>
         <p className="helper-text">
-          Menyimpan seluruh basis data lokal (semua kegiatan, batch, nomor bib, catatan finish, dan riwayat audit/koreksi) ke satu file JSON berversi skema.
+          <strong>JSON:</strong> backup lengkap untuk memulihkan data aplikasi.
         </p>
 
         <div className="export-btn-row">
@@ -283,7 +379,7 @@ export const ExportBackupScreen: React.FC<ExportBackupScreenProps> = ({
             disabled={isBusy}
             onClick={() => void handleExportJsonBackup(true)}
           >
-            Backup JSON (Unduh File)
+            Backup Lengkap (JSON)
           </button>
           <button
             type="button"

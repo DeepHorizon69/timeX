@@ -47,8 +47,10 @@ npm run preview
 5. **Riwayat Hasil, Pencarian Bib & Koreksi Teraudit (Layar E)**
    - Menampilkan daftar batch dari yang terbaru ke terlama serta pencarian lintas batch berdasarkan kode/warna nomor bib.
    - Setiap koreksi penugasan bib atau koreksi waktu tempuh wajib disertai alasan dan dicatat ke **Riwayat Audit & Koreksi** tanpa menghapus nilai lama.
-6. **Ekspor CSV & Backup/Restore JSON (Layar F)**
-   - **Ekspor CSV (UTF-8):** Menghasilkan satu baris per peserta/hasil (termasuk kutipan aman untuk koma, tanda kutip, dan baris baru).
+6. **Ekspor Hasil (CSV, Excel `.xlsx`, PDF `.pdf`) & Backup/Restore JSON (Layar F)**
+   - **Ekspor CSV (UTF-8):** Data tabel untuk spreadsheet atau pemrosesan lanjutan (termasuk kutipan aman untuk koma, tanda kutip, dan baris baru).
+   - **Laporan Excel (`.xlsx`):** Laporan hasil yang mudah dibaca dan dianalisis untuk penyelenggara acara, dilengkapi judul terformat, baris header terkunci (*freeze row*), filter tabel otomatis (*auto-filter*), lebar kolom proporsional, serta pemisahan lembar kerja antara **Hasil Lari Valid** dan **Perlu Diperiksa** (`laporan-lari-[nama-acara]-[tanggal].xlsx`).
+   - **Laporan PDF (`.pdf`):** Laporan siap dibagikan atau dicetak dengan ringkasan peserta tervalidasi, header tabel berulang di setiap halaman, bagian khusus untuk catatan yang perlu diperiksa, dan legenda status (`DNS`, `DNF`, `Perlu Diperiksa`) (`laporan-lari-[nama-acara]-[tanggal].pdf`).
    - **Backup & Impor JSON:** Menyimpan seluruh basis data IndexedDB beserta versi skema dan menampilkan pratinjau perbandingan sebelum pemulihan data dikonfirmasi.
 
 ---
