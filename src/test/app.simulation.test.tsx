@@ -64,6 +64,7 @@ describe('TimeX operator workflow', () => {
     clearActiveSessionBatchesForTests();
     sessionStorage.clear();
     await clearAllStores();
+    await EventRepository.createEvent('Lomba pagi');
   });
 
   afterEach(async () => {
@@ -71,6 +72,35 @@ describe('TimeX operator workflow', () => {
     setSimulatedWriteFailure(null);
     await retryCaptures();
     vi.restoreAllMocks();
+  });
+
+  it('starts with an empty form and creates only the activity entered by the operator', async () => {
+    await clearAllStores();
+    const user = userEvent.setup();
+    render(<App />);
+    await screen.findByRole('heading', { name: 'Buat kegiatan' });
+    expect(await EventRepository.listEvents()).toHaveLength(0);
+    expect(screen.getByLabelText('Nama kegiatan')).toHaveValue('');
+    expect(screen.getByRole('button', { name: 'Simpan kegiatan' })).toBeDisabled();
+    await user.type(screen.getByLabelText('Nama kegiatan'), 'Lomba sekolah');
+    setSimulatedWriteFailure('Penyimpanan penuh');
+    await user.click(screen.getByRole('button', { name: 'Simpan kegiatan' }));
+    expect(await screen.findByRole('alert')).toHaveTextContent('Penyimpanan penuh');
+    expect(await EventRepository.listEvents()).toHaveLength(0);
+    setSimulatedWriteFailure(null);
+    await user.click(screen.getByRole('button', { name: 'Simpan kegiatan' }));
+    await screen.findByRole('heading', { name: 'Lomba sekolah' });
+    expect((await EventRepository.listEvents()).map((event) => event.name)).toEqual([
+      'Lomba sekolah',
+    ]);
+  });
+
+  it('removes the empty legacy simulation on startup and opens activity setup', async () => {
+    await clearAllStores();
+    await EventRepository.createEvent('Simulasi Lari 2026-11-05', '2026-11-05');
+    render(<App />);
+    await screen.findByRole('heading', { name: 'Buat kegiatan' });
+    expect(await EventRepository.listEvents()).toHaveLength(0);
   });
 
   it('renames a saved preparation and keeps the name and bib after reopening', async () => {
@@ -87,6 +117,7 @@ describe('TimeX operator workflow', () => {
     const card = within(
       screen.getByRole('region', { name: 'Langkah berikutnya' })
     );
+    expect(card.getByText('1 bib dipilih')).toBeInTheDocument();
     const editButton = () => card.getByRole('button', { name: 'Edit nama' });
     const openEditor = () => user.click(editButton());
     await openEditor();
@@ -168,9 +199,10 @@ describe('TimeX operator workflow', () => {
         (await FinishEventRepository.listFinishEventsByBatch(batch.id)).length
       ).toBe(3)
     );
-    await user.click(
-      await screen.findByRole('button', { name: 'Isi bib F-001' })
-    );
+    await user.click(screen.getByRole('button', { name: '3 belum isi bib' }));
+    expect(
+      screen.getByRole('region', { name: 'Identifikasi F-001' })
+    ).toBeInTheDocument();
     await user.click(screen.getByRole('button', { name: 'Pilih P01' }));
     await user.click(screen.getByRole('button', { name: /Catat finish/i }));
     await waitFor(() =>
@@ -213,6 +245,9 @@ describe('TimeX operator workflow', () => {
         )
       ).toBeInTheDocument()
     );
+    expect(
+      screen.getByRole('button', { name: '0 belum isi bib' })
+    ).toBeDisabled();
     await user.click(screen.getByRole('button', { name: 'Akhiri pencatatan' }));
     await user.click(
       within(screen.getByRole('dialog')).getByRole('button', {
@@ -303,6 +338,40 @@ describe('TimeX operator workflow', () => {
     ).toBe(312340);
   });
 
+  it('shows pending captures in the dock and keeps recording until storage finishes', async () => {
+    const user = userEvent.setup();
+    render(<App />);
+    await startGelombang(user);
+    const saveCapture = FinishEventRepository.saveTimestampFirstCapture.bind(
+      FinishEventRepository
+    );
+    let releaseSave!: () => void;
+    const storageReady = new Promise<void>((resolve) => {
+      releaseSave = resolve;
+    });
+    vi.spyOn(FinishEventRepository, 'saveTimestampFirstCapture')
+      .mockImplementation(async (capture) => {
+        await storageReady;
+        return saveCapture(capture);
+      });
+
+    const dock = within(screen.getByRole('region', { name: 'Pencatatan finish' }));
+    await user.click(dock.getByRole('button', { name: /Catat finish/ }));
+    expect(dock.getByText('1 finish sedang disimpan')).toBeInTheDocument();
+    expect(dock.queryByText(/F-001/)).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Simpan ulang' })).not.toBeInTheDocument();
+    await user.click(dock.getByRole('button', { name: /Catat finish/ }));
+    expect(dock.getByText('2 finish sedang disimpan')).toBeInTheDocument();
+
+    await act(async () => {
+      releaseSave();
+      await retryCaptures();
+    });
+    expect(dock.getByText('Tersimpan')).toBeInTheDocument();
+    expect(dock.getByText(/F-002/)).toBeInTheDocument();
+    expect(screen.getAllByRole('button', { name: /^Isi bib F-/ })).toHaveLength(2);
+  });
+
   it('retains failed finish across navigation and retries the original ID and timestamp once', async () => {
     const user = userEvent.setup();
     render(<App />);
@@ -311,6 +380,11 @@ describe('TimeX operator workflow', () => {
     setSimulatedWriteFailure('Penyimpanan penuh');
     await user.click(screen.getByRole('button', { name: /Catat finish/i }));
     await screen.findByText('1 finish belum tersimpan');
+    const dock = within(screen.getByRole('region', { name: 'Pencatatan finish' }));
+    expect(dock.getByRole('button', { name: 'Simpan ulang' })).toBeEnabled();
+    expect(
+      screen.getByRole('alert', { name: 'Masalah penyimpanan' })
+    ).toHaveTextContent('Penyimpanan penuh');
     const pending = { ...getPendingCaptures()[0] };
     expect(sessionStorage.getItem('timex-pending-captures-v2')).toContain(
       pending.id
@@ -326,6 +400,11 @@ describe('TimeX operator workflow', () => {
     setSimulatedWriteFailure(null);
     await user.click(screen.getByRole('button', { name: 'Simpan ulang' }));
     await screen.findByRole('button', { name: 'Isi bib F-001' });
+    expect(
+      within(screen.getByRole('region', { name: 'Pencatatan finish' })).getByText(
+        'Tersimpan'
+      )
+    ).toBeInTheDocument();
     const finishes = await FinishEventRepository.listFinishEventsByBatch(
       batch.id
     );

@@ -18,9 +18,31 @@ npm run preview
 
 Gunakan URL yang ditampilkan terminal. Aplikasi perlu dibuka online sekali sampai halaman Perangkat menampilkan kesiapan offline. Service worker menyimpan aset aplikasi dan menunda aktivasi pembaruan selama pencatatan atau antrean penyimpanan masih aktif.
 
+## Upload ke Cloudflare
+
+Paket siap unggah tersedia di `release/timex-cloudflare.zip`. ZIP berisi hasil
+build dengan `index.html`, `sw.js`, `manifest.webmanifest`, `_headers`, dan folder
+`assets` langsung di akar arsip.
+
+Untuk unggah manual melalui Cloudflare Pages, buka **Workers & Pages**, buat
+aplikasi **Pages** dengan **Direct Upload**, lalu unggah ZIP dan pilih **Deploy
+site**. Jika formulir meminta folder hasil build, gunakan `dist`.
+
+Sumber aplikasi menggunakan perintah build `npm run build` dan folder keluaran
+`dist`. File `public/_headers` ikut disalin ke hasil build untuk mengatur cache.
+Paket ZIP perlu dibuat ulang dari isi `dist` setelah setiap build baru.
+
+Buka alamat HTTPS yang dihasilkan, lalu masuk ke **Perangkat** sampai muncul
+**Aplikasi siap dibuka kembali tanpa internet.** Uji muat ulang dalam mode pesawat.
+Untuk memindahkan catatan dari localhost ke alamat Cloudflare, ekspor backup JSON
+dari alamat lama lalu pulihkan melalui **Perangkat** pada alamat baru.
+
+Panduan unggah resmi ada di
+[Cloudflare Pages Direct Upload](https://developers.cloudflare.com/pages/get-started/direct-upload/).
+
 ## Workflow operator
 
-1. **Kegiatan** menampilkan kegiatan terpilih dan tindakan berikutnya. Kelola nama, tanggal, serta kegiatan tersimpan melalui **Kelola kegiatan**.
+1. Pada penggunaan pertama, isi **Buat kegiatan** dengan nama dan tanggal kegiatan. Setelah disimpan, **Kegiatan** menampilkan kegiatan terpilih dan tindakan berikutnya. Kelola nama, tanggal, serta kegiatan tersimpan melalui **Kelola kegiatan**.
 2. **Siapkan gelombang** membuka grid bib. Pilih warna, lalu ketuk nomor 1–50. Warna tetap terpilih dan bib duplikat diblokir. Nama peserta dapat ditambahkan melalui input ketik atau detail daftar.
 3. **Siap start** menampilkan ringkasan peserta. **Mulai sekarang** menangkap waktu start dan menjalankan stopwatch setelah penyimpanan berhasil.
 4. **Catat finish** merekam waktu setiap ketukan. Pilih **Isi bib** saat ada jeda untuk menghubungkan catatan dengan peserta. Tombol finish tetap tersedia selama identifikasi.

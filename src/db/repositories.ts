@@ -85,7 +85,40 @@ export const EventRepository = {
     const existing = await this.getActiveEvent();
     if (existing) return existing;
     const today = new Date().toISOString().slice(0, 10);
-    return this.createEvent(`Simulasi Lari ${today}`, today);
+    return this.createEvent('Kegiatan baru', today);
+  },
+
+  async removeEmptyDefaultEvents(): Promise<void> {
+    checkWriteAllowed();
+    const db = await getDb();
+    const tx = db.transaction(
+      ['events', 'batches', 'batchBibEntries', 'finishEvents', 'auditLogs'],
+      'readwrite'
+    );
+    const events = await tx.objectStore('events').getAll();
+    for (const event of events) {
+      if (event.name !== `Simulasi Lari ${event.eventDate}`) continue;
+      const [batches, entries, finishes, logs] = await Promise.all([
+        tx.objectStore('batches').index('by-eventId').count(event.id),
+        tx.objectStore('batchBibEntries').index('by-eventId').count(event.id),
+        tx.objectStore('finishEvents').index('by-eventId').count(event.id),
+        tx.objectStore('auditLogs').index('by-eventId').getAll(event.id),
+      ]);
+      const creation = logs[0];
+      if (
+        batches ||
+        entries ||
+        finishes ||
+        logs.length !== 1 ||
+        creation.action !== 'CREATE_EVENT' ||
+        creation.newValue !== `${event.name} (${event.eventDate})`
+      ) {
+        continue;
+      }
+      await tx.objectStore('events').delete(event.id);
+      await tx.objectStore('auditLogs').delete(creation.id);
+    }
+    await tx.done;
   },
 
   async createEvent(name: string, eventDate?: string): Promise<EventRecord> {

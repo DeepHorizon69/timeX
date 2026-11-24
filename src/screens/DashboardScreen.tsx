@@ -13,6 +13,7 @@ interface DashboardScreenProps {
   allEvents: EventRecord[];
   batches: BatchRecord[];
   allFinishEvents: FinishEventRecord[];
+  nextBatchBibCount: number;
   onCreateBatch: (mode: RecordingMode) => Promise<void>;
   onOpenBatch: (batch: BatchRecord) => void;
   onRenameBatch: (batchId: string, name: string) => Promise<void>;
@@ -28,6 +29,7 @@ export function DashboardScreen({
   allEvents,
   batches,
   allFinishEvents,
+  nextBatchBibCount,
   onCreateBatch,
   onOpenBatch,
   onRenameBatch,
@@ -240,6 +242,13 @@ export function DashboardScreen({
             </button>
           )}
         </div>
+        {next && (
+          <p className="next-action__participants">
+            {nextBatchBibCount > 0
+              ? `${nextBatchBibCount} bib dipilih`
+              : 'Belum ada bib dipilih'}
+          </p>
+        )}
         {batchNameEdit && (
           <form
             className="batch-name-editor"

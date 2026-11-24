@@ -5,6 +5,7 @@ import { App } from '../App';
 import { ThemePicker } from '../components/ThemePicker';
 import { initializeTheme, setTheme } from '../services/theme';
 import { clearAllStores, setWriteLease } from '../db/indexedDb';
+import { EventRepository } from '../db/repositories';
 import { BIB_COLOR_MAP } from '../domain/utils';
 import html from '../../index.html?raw';
 import stylesheet from '../styles.css?raw';
@@ -37,6 +38,7 @@ describe('Light and dark themes', () => {
     vi.stubGlobal('localStorage', environment.jsdom.window.localStorage);
     setWriteLease(Infinity);
     await clearAllStores();
+    await EventRepository.createEvent('Lomba pagi');
     window.localStorage.clear();
     document.head.innerHTML = '<meta name="theme-color" content="#f8fafc">';
     initializeTheme();
@@ -138,6 +140,9 @@ describe('Light and dark themes', () => {
         stylesheet.match(/:root\[data-theme='dark'\] \{([\s\S]*?)\n\}/)![1]
       ),
     };
+    expect(light['--bg-panel']).toBe(light['--bg-card']);
+    expect(dark['--bg-panel']).toBe(dark['--bg-card']);
+    expect(light['--bg-panel']).not.toBe(dark['--bg-panel']);
     for (const theme of [light, dark]) {
       for (const background of [
         '--bg-page',
@@ -164,6 +169,7 @@ describe('Light and dark themes', () => {
         ['--text-link', '--bg-card'],
         ['--text-panel-muted', '--bg-panel'],
         ['--text-panel', '--bg-panel'],
+        ['--text-panel-accent', '--bg-panel'],
       ]) {
         expect(
           contrast(theme[foreground], theme[background]),

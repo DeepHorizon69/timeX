@@ -19,7 +19,12 @@ import {
   captureFinishTimingNow,
   useScreenWakeLock,
 } from '../services/timekeeper';
-import { enqueueCapture, useCaptureSession } from '../services/captureSession';
+import {
+  downloadRescueFile,
+  enqueueCapture,
+  retryCaptures,
+  useCaptureSession,
+} from '../services/captureSession';
 import { BibBadge } from '../components/BibBadge';
 import { ConfirmDialog } from '../components/ConfirmDialog';
 import { LiveTimer } from '../components/LiveTimer';
@@ -109,6 +114,22 @@ export function RunningBatchScreen({
   onBackHome,
 }: RunningBatchScreenProps) {
   const session = useCaptureSession();
+  const screen = useRef<HTMLDivElement>(null);
+  const dock = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    const element = dock.current;
+    if (!element || typeof ResizeObserver === 'undefined') return;
+    const updateHeight = () => {
+      screen.current?.style.setProperty(
+        '--capture-dock-height',
+        `${element.getBoundingClientRect().height}px`
+      );
+    };
+    updateHeight();
+    const observer = new ResizeObserver(updateHeight);
+    observer.observe(element);
+    return () => observer.disconnect();
+  }, [batch.recoveryRequired]);
   const rosterById = useMemo(
     () => new Map(roster.map((entry) => [entry.id, entry])),
     [roster]
@@ -158,6 +179,16 @@ export function RunningBatchScreen({
   );
   const selected = selectedId ? finishesById.get(selectedId) : undefined;
   const latest = active[0];
+  const failedCapture = pending.find((item) => item.error);
+  const hasUnsaved = pending.length > 0 && !session.saving;
+  const pendingDisplay = failedCapture ?? pending[pending.length - 1];
+  const saveState = pending.length
+    ? hasUnsaved
+      ? 'error'
+      : 'saving'
+    : latest
+      ? 'saved'
+      : 'ready';
   const available = useMemo(
     () => {
       if (!selectedId) return [];
@@ -272,7 +303,10 @@ export function RunningBatchScreen({
     );
 
   return (
-    <div className="screen-container screen-container--with-finish-dock capture-screen">
+    <div
+      ref={screen}
+      className="screen-container screen-container--with-finish-dock capture-screen"
+    >
       <header className="capture-header">
         <div className="capture-header__top">
           <button className="btn btn--ghost" onClick={onBackHome}>
@@ -299,10 +333,22 @@ export function RunningBatchScreen({
             <strong>{active.length + pending.length}</strong>
             <span>Finish</span>
           </div>
-          <div>
+          <button
+            type="button"
+            className="capture-counter-action"
+            disabled={unassigned.length === 0}
+            aria-label={`${unassigned.length} belum isi bib`}
+            onClick={() => {
+              const oldest = unassigned[unassigned.length - 1];
+              if (oldest) {
+                setView('QUEUE');
+                selectFinish(oldest.id);
+              }
+            }}
+          >
             <strong>{unassigned.length}</strong>
             <span>Belum isi bib</span>
-          </div>
+          </button>
         </div>
       </header>
       {error && (
@@ -321,6 +367,29 @@ export function RunningBatchScreen({
           </button>
         )}
       </div>
+      {pending.length > 0 && (hasUnsaved || session.journalError) && (
+        <section
+          className="capture-save-error inline-alert inline-alert--error"
+          role="alert"
+          aria-label="Masalah penyimpanan"
+        >
+          <p>
+            {failedCapture?.error ??
+              (session.saving
+                ? 'Catatan finish sedang disimpan ke perangkat.'
+                : 'Catatan finish menunggu disimpan. Pilih Simpan ulang.')}
+          </p>
+          {session.journalError && (
+            <p>
+              Salinan darurat gagal disimpan. Unduh penyelamatan sebelum
+              menutup halaman.
+            </p>
+          )}
+          <button className="btn btn--secondary" onClick={downloadRescueFile}>
+            Unduh penyelamatan
+          </button>
+        </section>
+      )}
 
       <div className="segmented-toggle" aria-label="Tampilan pencatatan">
         <button
@@ -599,7 +668,37 @@ export function RunningBatchScreen({
       >
         Akhiri pencatatan
       </button>
-      <div className="finish-capture-dock">
+      <div
+        ref={dock}
+        className="finish-capture-dock"
+        role="region"
+        aria-label="Pencatatan finish"
+      >
+        <div className={`capture-save-summary capture-save-summary--${saveState}`}>
+          <div role="status" aria-atomic="true">
+            <strong>
+              {pendingDisplay
+                ? formatElapsedMs(pendingDisplay.elapsedMs)
+                : latest
+                  ? `${formatSequenceLabel(latest.sequence)} · ${formatElapsedMs(latest.elapsedMs)}`
+                  : 'Siap mencatat finish'}
+            </strong>
+            <span>
+              {pending.length
+                ? `${pending.length} finish ${hasUnsaved ? 'belum tersimpan' : 'sedang disimpan'}`
+                : latest ? 'Tersimpan' : 'Ketuk saat peserta melintas'}
+            </span>
+          </div>
+          {hasUnsaved && (
+            <button
+              type="button"
+              className="btn btn--small btn--warning"
+              onClick={() => void retryCaptures()}
+            >
+              Simpan ulang
+            </button>
+          )}
+        </div>
         <button className="btn-giant-finish" onClick={() => capture()}>
           <span className="btn-giant-finish__main">Catat finish</span>
           <span className="btn-giant-finish__sub">

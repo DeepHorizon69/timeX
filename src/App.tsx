@@ -42,6 +42,8 @@ import { LiveTimer } from './components/LiveTimer';
 import { QuickBackupButton } from './components/QuickBackupButton';
 import { useOfflineSupport } from './services/offlineSupport';
 import { getBatchName } from './domain/utils';
+import { EventSetupScreen } from './screens/EventSetupScreen';
+import { CopyrightFooter } from './components/CopyrightFooter';
 
 export type ScreenName =
   | 'HOME'
@@ -95,8 +97,10 @@ export const App: React.FC = () => {
       event = events.find((e) => e.status === 'ACTIVE') ?? events[0];
     }
     if (!event) {
-      event = await EventRepository.ensureDefaultEvent();
-      events = await EventRepository.listEvents();
+      if (eventReloadVersion.current !== version) return;
+      setAllEvents(events);
+      setEventData(null);
+      return;
     }
     const data = await readEventData(event);
     if (eventReloadVersion.current !== version) return;
@@ -142,6 +146,7 @@ export const App: React.FC = () => {
         setInitError(null);
         if (access === 'writer') {
           restoreCaptureJournal();
+          await EventRepository.removeEmptyDefaultEvents();
           await BatchRepository.flagRunningBatchesForRecovery(
             getActiveSessionBatchIds()
           );
@@ -173,6 +178,14 @@ export const App: React.FC = () => {
   const selectedRows =
     (selectedBatchId ? rowsByBatch?.get(selectedBatchId) : undefined) ??
     emptyBatchRows;
+  const nextBatch =
+    batches.find((batch) => batch.status === 'RUNNING') ??
+    batches.find((batch) => batch.status === 'DRAFT' || batch.status === 'READY');
+  const pendingShownInDock =
+    currentScreen === 'RUNNING' &&
+    selectedBatch &&
+    !selectedBatch.recoveryRequired &&
+    captureSession.pending.every((item) => item.batchId === selectedBatch.id);
   const showEventFinishes =
     currentScreen === 'HOME' || currentScreen === 'RESULTS';
   const allFinishEvents = useMemo(() => {
@@ -232,7 +245,7 @@ export const App: React.FC = () => {
     );
   }
 
-  if (initError || !eventData || !activeEvent) {
+  if (initError) {
     return (
       <div className="screen-container">
         <div className="card warning-card" role="alert">
@@ -256,6 +269,20 @@ export const App: React.FC = () => {
           )}
         </div>
       </div>
+    );
+  }
+
+  if (!eventData || !activeEvent) {
+    return (
+      <EventSetupScreen
+        writable={access === 'writer'}
+        checkingAccess={checkingAccess}
+        onRetryAccess={retryAccess}
+        onCreate={async (name, date) => {
+          const created = await EventRepository.createEvent(name, date);
+          await reloadEventData(created.id);
+        }}
+      />
     );
   }
 
@@ -353,7 +380,8 @@ export const App: React.FC = () => {
           </button>
         </aside>
       )}
-      {captureSession.pending.length > 0 && (
+      {captureSession.pending.length > 0 &&
+        !pendingShownInDock && (
         <aside className="capture-status" role="status">
           <div>
             <strong>
@@ -439,6 +467,9 @@ export const App: React.FC = () => {
               allEvents={allEvents}
               batches={batches}
               allFinishEvents={allFinishEvents}
+              nextBatchBibCount={
+                eventData.rowsByBatch.get(nextBatch?.id ?? '')?.roster.length ?? 0
+              }
               onCreateBatch={handleCreateBatch}
               onOpenBatch={handleOpenBatch}
               onRenameBatch={async (batchId, name) => {
@@ -783,6 +814,9 @@ export const App: React.FC = () => {
           )}
         </fieldset>
       </main>
+      {(currentScreen === 'HOME' ||
+        currentScreen === 'RESULTS' ||
+        currentScreen === 'EXPORT') && <CopyrightFooter />}
     </div>
   );
 };

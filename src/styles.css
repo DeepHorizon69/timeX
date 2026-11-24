@@ -34,10 +34,10 @@
   --bg-danger: #fef2f2;
   --text-danger: #991b1b;
   --border-danger: #b91c1c;
-  --bg-panel: #0f172a;
-  --text-panel: #ffffff;
-  --text-panel-muted: #cbd5e1;
-  --text-panel-accent: #bbf7d0;
+  --bg-panel: #ffffff;
+  --text-panel: #0f172a;
+  --text-panel-muted: #475569;
+  --text-panel-accent: #166534;
 }
 
 :root[data-theme='dark'] {
@@ -1864,6 +1864,12 @@ summary {
   padding: 0;
   margin: 0;
 }
+.app-copyright {
+  padding: 0.75rem 1rem 1.25rem;
+  text-align: center;
+  color: var(--text-muted);
+  font-size: 0.75rem;
+}
 .screen-container {
   padding: 1.25rem;
   gap: 1.5rem;
@@ -1970,7 +1976,8 @@ summary {
   width: 100%;
 }
 form > .btn,
-form > .button-row {
+form > .button-row,
+.event-setup .button-row {
   margin-top: 0.75rem;
 }
 .card {
@@ -1998,21 +2005,34 @@ form > .button-row {
 .next-action {
   background: var(--bg-panel);
   color: var(--text-panel);
-  padding: 1.5rem;
+  border: 1px solid var(--border-color);
+  padding: 1.25rem;
   border-radius: 16px;
 }
 .next-action .eyebrow {
   color: var(--text-panel-accent);
 }
 .next-action h2 {
-  font-size: 1.8rem;
-  letter-spacing: -0.04em;
+  font-size: clamp(1.5rem, 4vw, 1.8rem);
+  letter-spacing: -0.025em;
+  line-height: 1.2;
+  margin: 0;
+  flex: 1 1 12rem;
 }
 .next-action p:not(.eyebrow) {
   color: var(--text-panel-muted);
   font-size: 0.95rem;
   max-width: 38ch;
   line-height: 1.5;
+  margin: 0.75rem 0 0;
+}
+.next-action .next-action__participants {
+  font-size: 0.875rem;
+  margin-top: 0.5rem;
+  font-variant-numeric: tabular-nums;
+}
+.next-action > .eyebrow {
+  margin-bottom: 0.5rem;
 }
 .next-action .btn {
   margin-top: 1rem;
@@ -2031,6 +2051,12 @@ form > .button-row {
 .next-action__title .btn,
 .batch-name-editor .btn {
   margin-top: 0;
+}
+.next-action__title .btn {
+  flex: 0 0 auto;
+  color: var(--text-panel);
+  background: transparent;
+  border-color: var(--text-panel-muted);
 }
 .next-action__title .btn:focus-visible,
 .batch-name-editor :focus-visible {
@@ -2305,21 +2331,27 @@ form > .button-row {
 .capture-screen {
   gap: 1rem;
   padding-top: 0.75rem;
+  padding-bottom: calc(var(--capture-dock-height, 180px) + 1rem + env(safe-area-inset-bottom));
 }
 .capture-header {
   background: var(--bg-panel);
   color: var(--text-panel);
+  border: 1px solid var(--border-color);
   border-radius: 14px;
   padding: 0.5rem 1rem 1rem;
 }
 .capture-header__top {
-  display: flex;
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
   align-items: center;
   justify-content: space-between;
   gap: 0.4rem;
   font-size: 0.75rem;
   font-weight: 650;
-  flex-wrap: wrap;
+}
+.capture-header__top .batch-name {
+  text-align: center;
+  font-size: 0.875rem;
 }
 .capture-header__top .btn {
   color: var(--text-panel-muted);
@@ -2333,7 +2365,7 @@ form > .button-row {
   display: inline-block;
   width: 6px;
   height: 6px;
-  background: #86efac;
+  background: var(--text-panel-accent);
   border-radius: 50%;
   margin-right: 0.4rem;
 }
@@ -2344,26 +2376,46 @@ form > .button-row {
 .timer-value {
   display: block;
   font-family: ui-monospace, SFMono-Regular, Consolas, monospace;
-  font-size: clamp(2rem, 9vw, 3.6rem);
+  font-size: clamp(1.65rem, 8vw, 3.4rem);
   font-weight: 750;
-  letter-spacing: -0.06em;
+  letter-spacing: -0.035em;
   font-variant-numeric: tabular-nums;
   line-height: 1.15;
 }
 .capture-source {
   color: var(--text-panel-muted);
   text-align: center;
-  font-size: 0.68rem;
-  margin: 0.25rem 0 1.1rem;
+  font-size: 0.75rem;
+  margin: 0.4rem 0 0.85rem;
 }
 .capture-counters {
   display: grid;
-  grid-template-columns: repeat(3, 1fr);
+  grid-template-columns: repeat(3, minmax(0, 1fr));
   border-top: 1px solid #475569;
   padding-top: 0.8rem;
 }
-.capture-counters > div {
+.capture-counters > div,
+.capture-counter-action {
   text-align: center;
+  padding: 0.25rem;
+  min-width: 0;
+}
+.capture-counter-action {
+  color: var(--text-panel);
+  background: transparent;
+  border: 1px solid var(--text-panel-muted);
+  border-radius: 8px;
+  min-height: 56px;
+}
+.capture-counter-action:disabled {
+  opacity: 1;
+  border-color: transparent;
+}
+.capture-counter-action:not(:disabled):hover {
+  background: var(--bg-hover);
+}
+.capture-counter-action:focus-visible {
+  outline-color: var(--text-panel-accent);
 }
 .capture-counters strong {
   display: block;
@@ -2371,7 +2423,7 @@ form > .button-row {
 }
 .capture-counters span {
   display: block;
-  font-size: 0.65rem;
+  font-size: 0.75rem;
   color: var(--text-panel-muted);
   margin-top: 0.2rem;
 }
@@ -2380,7 +2432,7 @@ form > .button-row {
   align-items: center;
   justify-content: space-between;
   gap: 0.4rem;
-  font-size: 0.75rem;
+  font-size: 0.875rem;
   color: var(--text-muted);
   min-height: 48px;
   flex-wrap: wrap;
@@ -2412,12 +2464,17 @@ form > .button-row {
   padding: 0.85rem 0;
 }
 .capture-row--selected {
-  border-left: 3px solid var(--border-success);
-  padding-left: 0.75rem;
+  outline: 2px solid var(--border-success);
+  outline-offset: -2px;
+  padding-inline: 0.5rem;
+  border-radius: 8px;
   background: var(--bg-success-subtle);
 }
 .capture-row--cancelled {
-  opacity: 0.6;
+  color: var(--text-muted);
+}
+.capture-row--cancelled .capture-row__time > strong {
+  text-decoration: line-through;
 }
 .capture-row__time {
   display: grid;
@@ -2427,19 +2484,19 @@ form > .button-row {
   align-items: center;
 }
 .capture-row__time > span {
-  font-size: 0.7rem;
+  font-size: 0.75rem;
   font-weight: 700;
   color: var(--text-muted);
 }
 .capture-row__time > strong {
-  font-size: 1.15rem;
+  font-size: clamp(1.15rem, 4vw, 1.35rem);
   font-family: ui-monospace, monospace;
   font-variant-numeric: tabular-nums;
   letter-spacing: -0.04em;
 }
 .capture-row__time > small {
   grid-column: 2;
-  font-size: 0.65rem;
+  font-size: 0.75rem;
   color: var(--text-muted);
 }
 .capture-bib-button {
@@ -2530,12 +2587,66 @@ form > .button-row {
   background: var(--bg-page);
   z-index: 35;
 }
+.capture-save-summary {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.5rem;
+  min-height: 60px;
+  margin-bottom: 0.5rem;
+}
+.capture-save-summary > div {
+  min-width: 0;
+}
+.capture-save-summary strong,
+.capture-save-summary span {
+  display: block;
+}
+.capture-save-summary strong {
+  font-size: 0.875rem;
+  font-variant-numeric: tabular-nums;
+  overflow-wrap: anywhere;
+}
+.capture-save-summary span {
+  font-size: 0.75rem;
+  color: var(--text-muted);
+  margin-top: 0.2rem;
+}
+.capture-save-summary--saved span {
+  color: var(--text-success);
+}
+.capture-save-summary--saving span {
+  color: var(--text-warning);
+}
+.capture-save-summary--error {
+  background: var(--bg-danger);
+  color: var(--text-danger);
+  padding: 0.5rem;
+  border-radius: 8px;
+}
+.capture-save-summary--error span {
+  color: var(--text-danger);
+}
+.capture-save-summary .btn {
+  flex: 0 0 auto;
+}
+.capture-save-error p {
+  margin: 0 0 0.75rem;
+}
+.capture-screen input {
+  scroll-margin-block: 1rem calc(var(--capture-dock-height, 180px) + 1rem);
+}
 .btn-giant-finish {
   min-height: 80px;
   background: #15803d;
   border: 1px solid #166534;
   border-radius: 12px;
   box-shadow: none;
+  transition: background-color 100ms ease;
+}
+.btn-giant-finish:not(:disabled):active {
+  background: #166534;
+  transform: none;
 }
 .btn-giant-finish__main {
   font-size: 1.3rem;
@@ -2702,7 +2813,7 @@ form > .button-row {
     margin: 0 auto;
   }
   .next-action {
-    padding: 2rem;
+    padding: 1.5rem;
   }
   .roster-screen {
     max-width: 720px;
@@ -2728,8 +2839,7 @@ form > .button-row {
   .review-finish-list {
     grid-template-columns: repeat(2, minmax(0, 1fr));
   }
-  .screen-container--with-sticky-footer,
-  .screen-container--with-finish-dock {
+  .screen-container--with-sticky-footer {
     padding-bottom: 160px;
   }
 }

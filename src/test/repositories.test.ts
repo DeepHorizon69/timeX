@@ -21,6 +21,22 @@ describe('Run Timing Repositories, Timekeeping, Recovery & Export', () => {
     await clearAllStores();
   });
 
+  it('only removes untouched empty legacy simulations and keeps events with race data', async () => {
+    const empty = await EventRepository.createEvent('Simulasi Lari 2026-11-05', '2026-11-05');
+    const used = await EventRepository.createEvent('Simulasi Lari 2026-11-06', '2026-11-06');
+    const batch = await BatchRepository.createBatch(used.id);
+    const renamed = await EventRepository.createEvent('Simulasi Lari 2026-11-07', '2026-11-07');
+    await EventRepository.updateEvent(renamed.id, { name: 'Kegiatan operator' });
+    await EventRepository.removeEmptyDefaultEvents();
+    expect(await EventRepository.getEventById(empty.id)).toBeUndefined();
+    expect(await AuditRepository.listByEvent(empty.id)).toHaveLength(0);
+    expect(await EventRepository.getEventById(used.id)).toBeDefined();
+    expect(await BatchRepository.getBatchById(batch.id)).toBeDefined();
+    expect(await EventRepository.getEventById(renamed.id)).toMatchObject({
+      name: 'Kegiatan operator',
+    });
+  });
+
   it('creates an event and two batches, blocks duplicate bibs in same batch, allows same bib in another batch', async () => {
     const event = await EventRepository.createEvent('Tes Lari Pagi', '2026-10-22');
     expect(event.name).toBe('Tes Lari Pagi');
