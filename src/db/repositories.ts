@@ -9,40 +9,55 @@ import {
   FinishEventRecord,
   ParticipantStatus,
   RecordingMode,
+  SavedCapture,
   TimingSource,
 } from '../domain/types';
 import {
   BIB_COLOR_MAP,
   formatBibLabel,
   generateId,
+  getBatchName,
   isValidBibColor,
   isValidBibNumber,
 } from '../domain/utils';
 import { checkWriteAllowed, getDb, StoragePersistenceError } from './indexedDb';
+import {
+  timingSessionId,
+  getActiveSessionBatchIds,
+} from '../services/timekeeper';
 
 function wrapWriteError(err: unknown, fallbackMessage: string): never {
   if (err instanceof StoragePersistenceError) {
     throw err;
   }
   if (err instanceof Error) {
-    throw new StoragePersistenceError(`${fallbackMessage}: ${err.message}`, err);
+    throw new StoragePersistenceError(
+      `${fallbackMessage}: ${err.message}`,
+      err
+    );
   }
   throw new StoragePersistenceError(fallbackMessage, err);
 }
 
-export function sortBibEntriesStable(entries: BatchBibEntry[]): BatchBibEntry[] {
+export function sortBibEntriesStable(
+  entries: BatchBibEntry[]
+): BatchBibEntry[] {
   return [...entries].sort((a, b) => {
     const timeDiff = a.createdAt.localeCompare(b.createdAt);
     if (timeDiff !== 0) return timeDiff;
-    const colorDiff = BIB_COLOR_MAP[a.bibColor].sortOrder - BIB_COLOR_MAP[b.bibColor].sortOrder;
+    const colorDiff =
+      BIB_COLOR_MAP[a.bibColor].sortOrder - BIB_COLOR_MAP[b.bibColor].sortOrder;
     if (colorDiff !== 0) return colorDiff;
     return a.bibNumber - b.bibNumber;
   });
 }
 
-export function sortBibEntriesByBibCode(entries: BatchBibEntry[]): BatchBibEntry[] {
+export function sortBibEntriesByBibCode(
+  entries: BatchBibEntry[]
+): BatchBibEntry[] {
   return [...entries].sort((a, b) => {
-    const colorDiff = BIB_COLOR_MAP[a.bibColor].sortOrder - BIB_COLOR_MAP[b.bibColor].sortOrder;
+    const colorDiff =
+      BIB_COLOR_MAP[a.bibColor].sortOrder - BIB_COLOR_MAP[b.bibColor].sortOrder;
     if (colorDiff !== 0) return colorDiff;
     return a.bibNumber - b.bibNumber;
   });
@@ -197,6 +212,141 @@ export const EventRepository = {
 };
 
 export const BatchRepository = {
+  async deferReview(batchId: string, notes?: string): Promise<BatchRecord> {
+    checkWriteAllowed();
+    const db = await getDb();
+    const tx = db.transaction(
+      ['batches', 'batchBibEntries', 'finishEvents', 'auditLogs'],
+      'readwrite'
+    );
+    const batch = await tx.objectStore('batches').get(batchId);
+    if (!batch || batch.status !== 'REVIEW')
+      throw new Error('Buka pemeriksaan gelombang terlebih dahulu.');
+    const entries = await tx
+      .objectStore('batchBibEntries')
+      .index('by-batchId')
+      .getAll(batchId);
+    const finishes = await tx
+      .objectStore('finishEvents')
+      .index('by-batchId')
+      .getAll(batchId);
+    const now = new Date().toISOString();
+    for (const entry of entries.filter((item) => item.status === 'WAITING')) {
+      await tx
+        .objectStore('batchBibEntries')
+        .put({ ...entry, status: 'NEEDS_REVIEW', updatedAt: now });
+      await tx
+        .objectStore('auditLogs')
+        .put({
+          id: generateId('aud'),
+          eventId: batch.eventId,
+          batchId,
+          entityType: 'BIB_ENTRY',
+          entityId: entry.id,
+          action: 'DEFER_PARTICIPANT_REVIEW',
+          changedAt: now,
+          field: 'status',
+          oldValue: entry.status,
+          newValue: 'NEEDS_REVIEW',
+          reason: 'Operator menyimpan gelombang untuk diperiksa',
+        });
+    }
+    for (const finish of finishes.filter(
+      (item) => item.status === 'UNIDENTIFIED'
+    )) {
+      await tx
+        .objectStore('finishEvents')
+        .put({ ...finish, status: 'NEEDS_REVIEW' });
+      await tx
+        .objectStore('auditLogs')
+        .put({
+          id: generateId('aud'),
+          eventId: batch.eventId,
+          batchId,
+          entityType: 'FINISH_EVENT',
+          entityId: finish.id,
+          action: 'DEFER_FINISH_REVIEW',
+          changedAt: now,
+          field: 'status',
+          oldValue: finish.status,
+          newValue: 'NEEDS_REVIEW',
+          reason: 'Identitas belum dikonfirmasi operator',
+        });
+    }
+    const updated: BatchRecord = {
+      ...batch,
+      status: 'NEEDS_REVIEW',
+      completedAt: now,
+      updatedAt: now,
+      notes: notes?.trim() || batch.notes,
+    };
+    await tx.objectStore('batches').put(updated);
+    await tx
+      .objectStore('auditLogs')
+      .put({
+        id: generateId('aud'),
+        eventId: batch.eventId,
+        batchId,
+        entityType: 'BATCH',
+        entityId: batchId,
+        action: 'DEFER_REVIEW',
+        changedAt: now,
+        oldValue: batch.status,
+        newValue: 'NEEDS_REVIEW',
+        reason: notes?.trim() || 'Operator mengakui hasil tertunda',
+      });
+    await tx.done;
+    return updated;
+  },
+
+  async markWaitingParticipants(
+    batchId: string,
+    ids: string[],
+    status: 'DNS' | 'DNF' | 'NEEDS_REVIEW'
+  ): Promise<void> {
+    checkWriteAllowed();
+    const db = await getDb();
+    const tx = db.transaction(['batchBibEntries', 'auditLogs'], 'readwrite');
+    const entries = await tx
+      .objectStore('batchBibEntries')
+      .index('by-batchId')
+      .getAll(batchId);
+    const selected = entries.filter((entry) => ids.includes(entry.id));
+    if (
+      selected.length !== new Set(ids).size ||
+      selected.some(
+        (entry) => entry.status !== 'WAITING' || entry.finishEventId
+      )
+    ) {
+      await tx.done;
+      throw new Error(
+        'Daftar peserta berubah. Periksa kembali sebelum menandai status.'
+      );
+    }
+    const now = new Date().toISOString();
+    for (const entry of selected) {
+      await tx
+        .objectStore('batchBibEntries')
+        .put({ ...entry, status, updatedAt: now });
+      await tx
+        .objectStore('auditLogs')
+        .put({
+          id: generateId('aud'),
+          eventId: entry.eventId,
+          batchId,
+          entityType: 'BIB_ENTRY',
+          entityId: entry.id,
+          action: `MARK_PARTICIPANT_${status}`,
+          changedAt: now,
+          field: 'status',
+          oldValue: entry.status,
+          newValue: status,
+          reason: 'Operator mengonfirmasi perubahan status massal',
+        });
+    }
+    await tx.done;
+  },
+
   async listBatchesByEvent(eventId: string): Promise<BatchRecord[]> {
     const db = await getDb();
     const batches = await db.getAllFromIndex('batches', 'by-eventId', eventId);
@@ -210,7 +360,11 @@ export const BatchRepository = {
 
   async listBibEntriesByBatch(batchId: string): Promise<BatchBibEntry[]> {
     const db = await getDb();
-    const entries = await db.getAllFromIndex('batchBibEntries', 'by-batchId', batchId);
+    const entries = await db.getAllFromIndex(
+      'batchBibEntries',
+      'by-batchId',
+      batchId
+    );
     return sortBibEntriesStable(entries);
   },
 
@@ -270,6 +424,50 @@ export const BatchRepository = {
     }
   },
 
+  async renamePreparedBatch(batchId: string, name: string): Promise<void> {
+    const trimmed = name.trim();
+    if (!trimmed) {
+      throw new Error('Nama gelombang tidak boleh kosong.');
+    }
+    try {
+      checkWriteAllowed();
+      const db = await getDb();
+      const tx = db.transaction(['batches', 'auditLogs'], 'readwrite');
+      const batches = tx.objectStore('batches');
+      const batch = await batches.get(batchId);
+      if (!batch) {
+        throw new Error('Gelombang tidak ditemukan.');
+      }
+      if (batch.status !== 'DRAFT' && batch.status !== 'READY') {
+        throw new Error('Nama hanya dapat diedit sebelum gelombang dimulai.');
+      }
+      const oldName = getBatchName(batch);
+      if (oldName === trimmed) {
+        await tx.done;
+        return;
+      }
+      const now = new Date().toISOString();
+      await Promise.all([
+        batches.put({ ...batch, name: trimmed, updatedAt: now }),
+        tx.objectStore('auditLogs').put({
+          id: generateId('aud'),
+          eventId: batch.eventId,
+          batchId: batch.id,
+          entityType: 'BATCH',
+          entityId: batch.id,
+          action: 'RENAME_BATCH',
+          changedAt: now,
+          field: 'name',
+          oldValue: oldName,
+          newValue: trimmed,
+        }),
+        tx.done,
+      ]);
+    } catch (err) {
+      wrapWriteError(err, 'Gagal menyimpan nama gelombang');
+    }
+  },
+
   async updateRecordingMode(
     batchId: string,
     newMode: RecordingMode,
@@ -322,11 +520,19 @@ export const BatchRepository = {
     allowRunningException?: boolean;
     reason?: string;
   }): Promise<BatchBibEntry> {
-    const { batchId, bibColor, bibNumber, participantName, allowRunningException, reason } =
-      params;
+    const {
+      batchId,
+      bibColor,
+      bibNumber,
+      participantName,
+      allowRunningException,
+      reason,
+    } = params;
 
     if (!isValidBibColor(bibColor)) {
-      throw new Error('Warna bib tidak valid. Pilih Putih, Hijau, Merah, Biru, atau Kuning.');
+      throw new Error(
+        'Warna bib tidak valid. Pilih Putih, Hijau, Merah, Biru, atau Kuning.'
+      );
     }
     if (!isValidBibNumber(bibNumber)) {
       throw new Error('Nomor bib harus berupa angka bulat antara 1 sampai 50.');
@@ -335,7 +541,10 @@ export const BatchRepository = {
     try {
       checkWriteAllowed();
       const db = await getDb();
-      const tx = db.transaction(['batches', 'batchBibEntries', 'auditLogs'], 'readwrite');
+      const tx = db.transaction(
+        ['batches', 'batchBibEntries', 'auditLogs'],
+        'readwrite'
+      );
       const batch = await tx.objectStore('batches').get(batchId);
       if (!batch) {
         throw new Error('Batch tidak ditemukan.');
@@ -435,14 +644,19 @@ export const BatchRepository = {
     try {
       checkWriteAllowed();
       const db = await getDb();
-      const tx = db.transaction(['batches', 'batchBibEntries', 'auditLogs'], 'readwrite');
+      const tx = db.transaction(
+        ['batches', 'batchBibEntries', 'auditLogs'],
+        'readwrite'
+      );
       const entry = await tx.objectStore('batchBibEntries').get(entryId);
       if (!entry) {
         throw new Error('Peserta tidak ditemukan.');
       }
       const batch = await tx.objectStore('batches').get(entry.batchId);
       if (!batch || (batch.status !== 'DRAFT' && batch.status !== 'READY')) {
-        throw new Error('Nomor bib hanya dapat diubah langsung sebelum batch dimulai.');
+        throw new Error(
+          'Nomor bib hanya dapat diubah langsung sebelum batch dimulai.'
+        );
       }
 
       const siblings = await tx
@@ -451,11 +665,16 @@ export const BatchRepository = {
         .getAll(entry.batchId);
 
       const duplicate = siblings.find(
-        (e) => e.id !== entryId && e.bibColor === bibColor && e.bibNumber === bibNumber
+        (e) =>
+          e.id !== entryId &&
+          e.bibColor === bibColor &&
+          e.bibNumber === bibNumber
       );
       const newLabel = formatBibLabel(bibColor, bibNumber);
       if (duplicate) {
-        throw new Error(`Nomor bib ${newLabel} sudah ada di Batch #${batch.batchNumber}.`);
+        throw new Error(
+          `Nomor bib ${newLabel} sudah ada di Batch #${batch.batchNumber}.`
+        );
       }
 
       const now = new Date().toISOString();
@@ -532,19 +751,21 @@ export const BatchRepository = {
     try {
       checkWriteAllowed();
       const db = await getDb();
-      const tx = db.transaction(['batches', 'batchBibEntries', 'auditLogs'], 'readwrite');
+      const tx = db.transaction(
+        ['batches', 'batchBibEntries', 'auditLogs'],
+        'readwrite'
+      );
       const batch = await tx.objectStore('batches').get(batchId);
       if (!batch) {
         throw new Error('Batch tidak ditemukan.');
       }
       if (batch.status !== 'DRAFT' && batch.status !== 'READY') {
-        throw new Error(`Batch #${batch.batchNumber} sudah dimulai atau selesai.`);
+        throw new Error(
+          `Batch #${batch.batchNumber} sudah dimulai atau selesai.`
+        );
       }
 
-      const eventBatches = await tx
-        .objectStore('batches')
-        .index('by-eventId')
-        .getAll(batch.eventId);
+      const eventBatches = await tx.objectStore('batches').getAll();
       const otherRunning = eventBatches.find(
         (b) => b.id !== batchId && b.status === 'RUNNING'
       );
@@ -559,7 +780,9 @@ export const BatchRepository = {
         .index('by-batchId')
         .getAll(batchId);
       if (roster.length === 0) {
-        throw new Error('Tidak dapat memulai batch kosong. Tambahkan minimal 1 nomor bib.');
+        throw new Error(
+          'Tidak dapat memulai batch kosong. Tambahkan minimal 1 nomor bib.'
+        );
       }
 
       const updated: BatchRecord = {
@@ -568,6 +791,7 @@ export const BatchRepository = {
         startedAtWallClock,
         startedAtMonotonicMs,
         timingSource: 'MONOTONIC',
+        timingSessionId,
         recoveryRequired: false,
         updatedAt: startedAtWallClock,
       };
@@ -595,7 +819,10 @@ export const BatchRepository = {
       ) {
         throw err;
       }
-      wrapWriteError(err, 'Gagal memulai batch. Pastikan penyimpanan perangkat tersedia');
+      wrapWriteError(
+        err,
+        'Gagal memulai batch. Pastikan penyimpanan perangkat tersedia'
+      );
     }
   },
 
@@ -603,9 +830,15 @@ export const BatchRepository = {
    * Called on page load to detect any RUNNING batches whose monotonic timer origin
    * was lost due to browser reload/reopen.
    */
-  async flagRunningBatchesForRecovery(activeInMemoryBatchIds: Set<string>): Promise<BatchRecord[]> {
+  async flagRunningBatchesForRecovery(
+    activeInMemoryBatchIds: Set<string>
+  ): Promise<BatchRecord[]> {
     const db = await getDb();
-    const runningBatches = await db.getAllFromIndex('batches', 'by-status', 'RUNNING');
+    const runningBatches = await db.getAllFromIndex(
+      'batches',
+      'by-status',
+      'RUNNING'
+    );
     const flagged: BatchRecord[] = [];
 
     for (const b of runningBatches) {
@@ -629,7 +862,8 @@ export const BatchRepository = {
             entityId: b.id,
             action: 'RELOAD_RECOVERY_TRIGGERED',
             changedAt: now,
-            reason: 'Halaman dimuat ulang saat batch masih RUNNING; origin waktu monotonik terputus.',
+            reason:
+              'Halaman dimuat ulang saat batch masih RUNNING; origin waktu monotonik terputus.',
           });
           await tx.done;
           flagged.push(updated);
@@ -701,11 +935,32 @@ export const BatchRepository = {
       if (!batch) {
         throw new Error('Batch tidak ditemukan.');
       }
+      if (targetStatus === 'RUNNING') {
+        const running = await tx
+          .objectStore('batches')
+          .index('by-status')
+          .getAll('RUNNING');
+        if (running.some((item) => item.id !== batchId)) {
+          await tx.done;
+          throw new Error(
+            'Tutup gelombang yang sedang berjalan sebelum membuka kembali pencatatan.'
+          );
+        }
+      }
       const now = new Date().toISOString();
       const updated: BatchRecord = {
         ...batch,
         status: targetStatus,
-        recoveryRequired: false,
+        recoveryRequired:
+          targetStatus === 'RUNNING' &&
+          (batch.recoveryRequired ||
+            !getActiveSessionBatchIds().has(batch.id) ||
+            (batch.timingSource !== 'WALL_CLOCK_FALLBACK' &&
+              (typeof batch.startedAtMonotonicMs !== 'number' ||
+                Boolean(
+                  batch.timingSessionId &&
+                    batch.timingSessionId !== timingSessionId
+                )))),
         completedAt:
           targetStatus === 'COMPLETED' || targetStatus === 'NEEDS_REVIEW'
             ? now
@@ -750,7 +1005,9 @@ export const BatchRepository = {
         .objectStore('finishEvents')
         .index('by-batchId')
         .getAll(batchId);
-      const unidentified = finishEvents.filter((f) => f.status === 'UNIDENTIFIED');
+      const unidentified = finishEvents.filter(
+        (f) => f.status === 'UNIDENTIFIED'
+      );
       if (unidentified.length > 0) {
         throw new Error(
           `Masih ada ${unidentified.length} catatan waktu finish yang belum diidentifikasi. Identifikasi, tandai Perlu Diperiksa, atau batalkan terlebih dahulu.`
@@ -767,7 +1024,9 @@ export const BatchRepository = {
           `Masih ada ${waiting.length} peserta berstatus Belum Finish (${waiting
             .slice(0, 4)
             .map((w) => w.bibLabel)
-            .join(', ')}${waiting.length > 4 ? '...' : ''}). Hubungkan ke waktu finish atau tandai DNS / DNF / Perlu Diperiksa.`
+            .join(
+              ', '
+            )}${waiting.length > 4 ? '...' : ''}). Hubungkan ke waktu finish atau tandai DNS / DNF / Perlu Diperiksa.`
         );
       }
 
@@ -775,7 +1034,9 @@ export const BatchRepository = {
         finishEvents.some((f) => f.status === 'NEEDS_REVIEW') ||
         roster.some((r) => r.status === 'NEEDS_REVIEW');
 
-      const finalStatus: BatchStatus = hasNeedsReview ? 'NEEDS_REVIEW' : 'COMPLETED';
+      const finalStatus: BatchStatus = hasNeedsReview
+        ? 'NEEDS_REVIEW'
+        : 'COMPLETED';
       const now = new Date().toISOString();
       const updated: BatchRecord = {
         ...batch,
@@ -805,7 +1066,8 @@ export const BatchRepository = {
       if (
         err instanceof Error &&
         !(err instanceof StoragePersistenceError) &&
-        (err.message.includes('Masih ada') || err.message.includes('tidak ditemukan'))
+        (err.message.includes('Masih ada') ||
+          err.message.includes('tidak ditemukan'))
       ) {
         throw err;
       }
@@ -814,20 +1076,35 @@ export const BatchRepository = {
   },
 };
 
+interface TimestampFirstFinishInput {
+  id?: string;
+  batchId: string;
+  recordedAtWallClock: string;
+  recordedAtMonotonicMs?: number;
+  elapsedMs: number;
+  timingSource: TimingSource;
+}
+
 export const FinishEventRepository = {
   async listFinishEventsByBatch(batchId: string): Promise<FinishEventRecord[]> {
     const db = await getDb();
-    const events = await db.getAllFromIndex('finishEvents', 'by-batchId', batchId);
+    const events = await db.getAllFromIndex(
+      'finishEvents',
+      'by-batchId',
+      batchId
+    );
     return events.sort((a, b) => b.sequence - a.sequence);
   },
 
-  async recordTimestampFirstFinish(params: {
-    batchId: string;
-    recordedAtWallClock: string;
-    recordedAtMonotonicMs?: number;
-    elapsedMs: number;
-    timingSource: TimingSource;
-  }): Promise<FinishEventRecord> {
+  async recordTimestampFirstFinish(
+    params: TimestampFirstFinishInput
+  ): Promise<FinishEventRecord> {
+    return (await this.saveTimestampFirstCapture(params)).finishEvent;
+  },
+
+  async saveTimestampFirstCapture(
+    params: TimestampFirstFinishInput
+  ): Promise<SavedCapture> {
     const {
       batchId,
       recordedAtWallClock,
@@ -840,6 +1117,15 @@ export const FinishEventRepository = {
       checkWriteAllowed();
       const db = await getDb();
       const tx = db.transaction(['batches', 'finishEvents'], 'readwrite');
+      if (params.id) {
+        const saved = await tx.objectStore('finishEvents').get(params.id);
+        if (saved) {
+          if (saved.batchId !== batchId)
+            throw new Error('ID finish berasal dari gelombang lain.');
+          await tx.done;
+          return { finishEvent: saved };
+        }
+      }
       const batch = await tx.objectStore('batches').get(batchId);
       if (!batch) {
         throw new Error('Batch tidak ditemukan.');
@@ -849,11 +1135,14 @@ export const FinishEventRepository = {
         .objectStore('finishEvents')
         .index('by-batchId')
         .getAll(batchId);
-      const maxSeq = existing.reduce((m, f) => (f.sequence > m ? f.sequence : m), 0);
+      const maxSeq = existing.reduce(
+        (m, f) => (f.sequence > m ? f.sequence : m),
+        0
+      );
 
       const safeElapsedMs = Math.max(0, Math.round(elapsedMs));
       const record: FinishEventRecord = {
-        id: generateId('fin'),
+        id: params.id ?? generateId('fin'),
         eventId: batch.eventId,
         batchId: batch.id,
         sequence: maxSeq + 1,
@@ -866,8 +1155,13 @@ export const FinishEventRepository = {
       };
 
       await tx.objectStore('finishEvents').put(record);
+      const reopenedBatch: BatchRecord | undefined =
+        batch.status === 'COMPLETED'
+          ? { ...batch, status: 'NEEDS_REVIEW', updatedAt: recordedAtWallClock }
+          : undefined;
+      if (reopenedBatch) await tx.objectStore('batches').put(reopenedBatch);
       await tx.done;
-      return record;
+      return { finishEvent: record, batch: reopenedBatch };
     } catch (err) {
       wrapWriteError(
         err,
@@ -876,14 +1170,9 @@ export const FinishEventRepository = {
     }
   },
 
-  async recordDirectCardFinish(params: {
-    batchId: string;
+  async recordDirectCardFinish(params: TimestampFirstFinishInput & {
     batchBibEntryId: string;
-    recordedAtWallClock: string;
-    recordedAtMonotonicMs?: number;
-    elapsedMs: number;
-    timingSource: TimingSource;
-  }): Promise<{ finishEvent: FinishEventRecord; bibEntry: BatchBibEntry }> {
+  }): Promise<SavedCapture & { bibEntry: BatchBibEntry }> {
     const {
       batchId,
       batchBibEntryId,
@@ -904,9 +1193,21 @@ export const FinishEventRepository = {
       if (!batch) {
         throw new Error('Batch tidak ditemukan.');
       }
-      const entry = await tx.objectStore('batchBibEntries').get(batchBibEntryId);
+      const entry = await tx
+        .objectStore('batchBibEntries')
+        .get(batchBibEntryId);
       if (!entry || entry.batchId !== batchId) {
         throw new Error('Peserta tidak ditemukan dalam batch ini.');
+      }
+      if (params.id) {
+        const saved = await tx.objectStore('finishEvents').get(params.id);
+        if (saved) {
+          if (saved.batchId !== batchId || saved.batchBibEntryId !== entry.id) {
+            throw new Error('ID finish tidak cocok dengan peserta.');
+          }
+          await tx.done;
+          return { finishEvent: saved, bibEntry: entry };
+        }
       }
       if (entry.status === 'FINISHED' && entry.finishEventId) {
         throw new Error(
@@ -918,11 +1219,14 @@ export const FinishEventRepository = {
         .objectStore('finishEvents')
         .index('by-batchId')
         .getAll(batchId);
-      const maxSeq = existing.reduce((m, f) => (f.sequence > m ? f.sequence : m), 0);
+      const maxSeq = existing.reduce(
+        (m, f) => (f.sequence > m ? f.sequence : m),
+        0
+      );
 
       const safeElapsedMs = Math.max(0, Math.round(elapsedMs));
       const finishEvent: FinishEventRecord = {
-        id: generateId('fin'),
+        id: params.id ?? generateId('fin'),
         eventId: batch.eventId,
         batchId: batch.id,
         sequence: maxSeq + 1,
@@ -943,9 +1247,14 @@ export const FinishEventRepository = {
       };
 
       await tx.objectStore('finishEvents').put(finishEvent);
+      const reopenedBatch: BatchRecord | undefined =
+        batch.status === 'COMPLETED'
+          ? { ...batch, status: 'NEEDS_REVIEW', updatedAt: recordedAtWallClock }
+          : undefined;
+      if (reopenedBatch) await tx.objectStore('batches').put(reopenedBatch);
       await tx.objectStore('batchBibEntries').put(updatedEntry);
       await tx.done;
-      return { finishEvent, bibEntry: updatedEntry };
+      return { finishEvent, bibEntry: updatedEntry, batch: reopenedBatch };
     } catch (err) {
       if (
         err instanceof Error &&
@@ -974,15 +1283,21 @@ export const FinishEventRepository = {
         ['finishEvents', 'batchBibEntries', 'auditLogs'],
         'readwrite'
       );
-      const finishEvent = await tx.objectStore('finishEvents').get(finishEventId);
+      const finishEvent = await tx
+        .objectStore('finishEvents')
+        .get(finishEventId);
       if (!finishEvent) {
         throw new Error('Catatan finish tidak ditemukan.');
       }
       if (finishEvent.status === 'CANCELLED') {
-        throw new Error('Catatan finish yang sudah dibatalkan tidak dapat diidentifikasi.');
+        throw new Error(
+          'Catatan finish yang sudah dibatalkan tidak dapat diidentifikasi.'
+        );
       }
 
-      const targetBib = await tx.objectStore('batchBibEntries').get(batchBibEntryId);
+      const targetBib = await tx
+        .objectStore('batchBibEntries')
+        .get(batchBibEntryId);
       if (!targetBib || targetBib.batchId !== finishEvent.batchId) {
         throw new Error('Nomor bib tidak ditemukan pada batch yang sama.');
       }
@@ -1003,7 +1318,9 @@ export const FinishEventRepository = {
 
       // If this finish event was previously linked to another bib entry, release the old bib entry
       if (previousBibEntryId && previousBibEntryId !== batchBibEntryId) {
-        const oldBib = await tx.objectStore('batchBibEntries').get(previousBibEntryId);
+        const oldBib = await tx
+          .objectStore('batchBibEntries')
+          .get(previousBibEntryId);
         if (oldBib) {
           previousBibLabel = oldBib.bibLabel;
           await tx.objectStore('batchBibEntries').put({
@@ -1015,7 +1332,9 @@ export const FinishEventRepository = {
         }
       }
 
-      const isCorrection = Boolean(previousBibEntryId && previousBibEntryId !== batchBibEntryId);
+      const isCorrection = Boolean(
+        previousBibEntryId && previousBibEntryId !== batchBibEntryId
+      );
       const updatedHistory = [...finishEvent.correctionHistory];
       if (isCorrection || reason) {
         updatedHistory.push({
@@ -1024,7 +1343,11 @@ export const FinishEventRepository = {
           field: 'batchBibEntryId',
           oldValue: previousBibLabel ?? previousBibEntryId ?? null,
           newValue: targetBib.bibLabel,
-          reason: reason || (isCorrection ? 'Koreksi identifikasi nomor bib' : 'Identifikasi nomor bib'),
+          reason:
+            reason ||
+            (isCorrection
+              ? 'Koreksi identifikasi nomor bib'
+              : 'Identifikasi nomor bib'),
         });
       }
 
@@ -1091,7 +1414,9 @@ export const FinishEventRepository = {
         ['finishEvents', 'batchBibEntries', 'auditLogs'],
         'readwrite'
       );
-      const finishEvent = await tx.objectStore('finishEvents').get(finishEventId);
+      const finishEvent = await tx
+        .objectStore('finishEvents')
+        .get(finishEventId);
       if (!finishEvent) {
         throw new Error('Catatan finish tidak ditemukan.');
       }
@@ -1119,7 +1444,9 @@ export const FinishEventRepository = {
           id: generateId('cor'),
           changedAt: now,
           field: 'status',
-          oldValue: oldBibLabel ? `${finishEvent.status} (${oldBibLabel})` : finishEvent.status,
+          oldValue: oldBibLabel
+            ? `${finishEvent.status} (${oldBibLabel})`
+            : finishEvent.status,
           newValue: targetStatus,
           reason: reason || notes || `Ubah status ke ${targetStatus}`,
         },
@@ -1140,7 +1467,10 @@ export const FinishEventRepository = {
         batchId: finishEvent.batchId,
         entityType: 'FINISH_EVENT',
         entityId: finishEvent.id,
-        action: targetStatus === 'NEEDS_REVIEW' ? 'MARK_FINISH_NEEDS_REVIEW' : 'UNASSIGN_FINISH',
+        action:
+          targetStatus === 'NEEDS_REVIEW'
+            ? 'MARK_FINISH_NEEDS_REVIEW'
+            : 'UNASSIGN_FINISH',
         changedAt: now,
         oldValue: oldBibLabel ?? finishEvent.status,
         newValue: targetStatus,
@@ -1166,7 +1496,9 @@ export const FinishEventRepository = {
         ['finishEvents', 'batchBibEntries', 'auditLogs'],
         'readwrite'
       );
-      const finishEvent = await tx.objectStore('finishEvents').get(finishEventId);
+      const finishEvent = await tx
+        .objectStore('finishEvents')
+        .get(finishEventId);
       if (!finishEvent) {
         throw new Error('Catatan finish tidak ditemukan.');
       }
@@ -1245,7 +1577,9 @@ export const FinishEventRepository = {
       checkWriteAllowed();
       const db = await getDb();
       const tx = db.transaction(['finishEvents', 'auditLogs'], 'readwrite');
-      const finishEvent = await tx.objectStore('finishEvents').get(finishEventId);
+      const finishEvent = await tx
+        .objectStore('finishEvents')
+        .get(finishEventId);
       if (!finishEvent) {
         throw new Error('Catatan finish tidak ditemukan.');
       }
@@ -1302,7 +1636,9 @@ export const FinishEventRepository = {
         ['batchBibEntries', 'finishEvents', 'auditLogs'],
         'readwrite'
       );
-      const entry = await tx.objectStore('batchBibEntries').get(batchBibEntryId);
+      const entry = await tx
+        .objectStore('batchBibEntries')
+        .get(batchBibEntryId);
       if (!entry) {
         throw new Error('Peserta tidak ditemukan.');
       }
@@ -1394,7 +1730,9 @@ export const FinishEventRepository = {
       entry,
       batch,
       event,
-      finishEvent: entry.finishEventId ? finishMap.get(entry.finishEventId) : undefined,
+      finishEvent: entry.finishEventId
+        ? finishMap.get(entry.finishEventId)
+        : undefined,
     }));
 
     return {

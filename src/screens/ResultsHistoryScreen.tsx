@@ -11,6 +11,7 @@ import {
   formatSequenceLabel,
   formatWallClockDateTime,
   formatWallClockTime,
+  getBatchName,
   getBatchStatusLabel,
   getParticipantStatusLabel,
   matchesBibQuery,
@@ -58,15 +59,20 @@ export const ResultsHistoryScreen: React.FC<ResultsHistoryScreenProps> = ({
   const [showAuditLogs, setShowAuditLogs] = useState<boolean>(false);
 
   // Deliberate correction state inside Results screen
-  const [correctingEntryId, setCorrectingEntryId] = useState<string | null>(null);
+  const [correctingEntryId, setCorrectingEntryId] = useState<string | null>(
+    null
+  );
   const [editElapsedInput, setEditElapsedInput] = useState<string>('');
   const [editReasonInput, setEditReasonInput] = useState<string>('');
   const [swapFinishIdInput, setSwapFinishIdInput] = useState<string>('');
   const [correctionError, setCorrectionError] = useState<string | null>(null);
-  const [correctionSuccess, setCorrectionSuccess] = useState<string | null>(null);
+  const [correctionSuccess, setCorrectionSuccess] = useState<string | null>(
+    null
+  );
 
   const finishMap = useMemo(
-    () => new Map<string, FinishEventRecord>(allFinishEvents.map((f) => [f.id, f])),
+    () =>
+      new Map<string, FinishEventRecord>(allFinishEvents.map((f) => [f.id, f])),
     [allFinishEvents]
   );
 
@@ -77,22 +83,31 @@ export const ResultsHistoryScreen: React.FC<ResultsHistoryScreenProps> = ({
   );
 
   const selectedBatch = useMemo(
-    () => orderedBatches.find((b) => b.id === selectedBatchId) ?? orderedBatches[0] ?? null,
+    () =>
+      orderedBatches.find((b) => b.id === selectedBatchId) ??
+      orderedBatches[0] ??
+      null,
     [orderedBatches, selectedBatchId]
   );
 
   // Global search across all batches when searchQuery is typed
   const crossBatchMatches = useMemo(() => {
     if (!searchQuery.trim()) return [];
-    const batchMap = new Map<string, BatchRecord>(batches.map((b) => [b.id, b]));
+    const batchMap = new Map<string, BatchRecord>(
+      batches.map((b) => [b.id, b])
+    );
     return allBibEntries
       .filter((entry) => matchesBibQuery(entry, searchQuery))
       .map((entry) => ({
         entry,
         batch: batchMap.get(entry.batchId),
-        finish: entry.finishEventId ? finishMap.get(entry.finishEventId) : undefined,
+        finish: entry.finishEventId
+          ? finishMap.get(entry.finishEventId)
+          : undefined,
       }))
-      .sort((a, b) => (b.batch?.batchNumber ?? 0) - (a.batch?.batchNumber ?? 0));
+      .sort(
+        (a, b) => (b.batch?.batchNumber ?? 0) - (a.batch?.batchNumber ?? 0)
+      );
   }, [allBibEntries, batches, finishMap, searchQuery]);
 
   const selectedBatchEntries = useMemo(() => {
@@ -118,13 +133,17 @@ export const ResultsHistoryScreen: React.FC<ResultsHistoryScreenProps> = ({
 
   const selectedBatchAuditLogs = useMemo(() => {
     if (!selectedBatch) return auditLogs.slice(0, 30);
-    return auditLogs.filter((l) => !l.batchId || l.batchId === selectedBatch.id);
+    return auditLogs.filter(
+      (l) => !l.batchId || l.batchId === selectedBatch.id
+    );
   }, [auditLogs, selectedBatch]);
 
   const handleOpenCorrection = (entry: BatchBibEntry) => {
     setCorrectionError(null);
     setCorrectionSuccess(null);
-    const fin = entry.finishEventId ? finishMap.get(entry.finishEventId) : undefined;
+    const fin = entry.finishEventId
+      ? finishMap.get(entry.finishEventId)
+      : undefined;
     setCorrectingEntryId(entry.id);
     setEditElapsedInput(fin ? formatElapsedMs(fin.elapsedMs) : '');
     setSwapFinishIdInput(fin?.id ?? '');
@@ -190,17 +209,17 @@ export const ResultsHistoryScreen: React.FC<ResultsHistoryScreenProps> = ({
   return (
     <div className="screen-container">
       {/* Header */}
-      <header className="sticky-top-bar">
+      <header className="page-heading">
         <div className="sticky-top-bar__left">
           <button
             type="button"
             className="btn btn--small btn--ghost"
             onClick={onBackHome}
           >
-            ← Beranda
+            Kembali
           </button>
           <div>
-            <span className="sticky-top-bar__title">Hasil & Riwayat Batch</span>
+            <h1>Hasil kegiatan</h1>
             <span className="sticky-top-bar__sub">{activeEvent.name}</span>
           </div>
         </div>
@@ -209,7 +228,7 @@ export const ResultsHistoryScreen: React.FC<ResultsHistoryScreenProps> = ({
           className="btn btn--small btn--primary"
           onClick={onNavigateExport}
         >
-          Ekspor CSV / JSON
+          Ekspor hasil
         </button>
       </header>
 
@@ -241,19 +260,21 @@ export const ResultsHistoryScreen: React.FC<ResultsHistoryScreenProps> = ({
         {searchQuery.trim() !== '' && (
           <div className="search-results-box">
             <h3 className="subsection-title">
-              Hasil Pencarian &ldquo;{searchQuery}&rdquo; ({crossBatchMatches.length}{' '}
-              catatan di semua batch):
+              Hasil Pencarian &ldquo;{searchQuery}&rdquo; (
+              {crossBatchMatches.length} catatan di semua gelombang)
             </h3>
             {crossBatchMatches.length === 0 ? (
-              <p className="helper-text">Tidak ditemukan nomor bib yang cocok.</p>
+              <p className="helper-text">
+                Tidak ditemukan nomor bib yang cocok.
+              </p>
             ) : (
               <ul className="roster-list">
                 {crossBatchMatches.map(({ entry, batch, finish }) => (
                   <li key={entry.id} className="roster-item">
                     <div className="roster-item__content">
                       <div className="roster-item__left">
-                        <span className="batch-pill">
-                          Batch #{batch?.batchNumber ?? '?'}
+                        <span className="batch-pill batch-name">
+                          {batch ? getBatchName(batch) : 'Gelombang #?'}
                         </span>
                         <BibBadge
                           color={entry.bibColor}
@@ -271,13 +292,13 @@ export const ResultsHistoryScreen: React.FC<ResultsHistoryScreenProps> = ({
                       {batch && (
                         <button
                           type="button"
-                          className="btn btn--small btn--secondary"
+                          className="btn btn--small btn--secondary batch-name"
                           onClick={() => {
                             setSelectedBatchId(batch.id);
                             setSearchQuery('');
                           }}
                         >
-                          Lihat Batch #{batch.batchNumber}
+                          Lihat {getBatchName(batch)}
                         </button>
                       )}
                     </div>
@@ -292,19 +313,19 @@ export const ResultsHistoryScreen: React.FC<ResultsHistoryScreenProps> = ({
       {orderedBatches.length === 0 ? (
         <section className="card">
           <div className="empty-state">
-            Belum ada batch pada kegiatan ini. Buat batch baru dari Beranda.
+            Hasil akan muncul setelah gelombang pertama disiapkan.
           </div>
         </section>
       ) : (
         <>
           {/* Batch Selector List (Reverse Chronological) */}
-          <section className="card" aria-label="Pilih Batch">
-            <h2 className="section-title">
-              Daftar Batch (Terbaru ke Terlama)
-            </h2>
+          <section className="card" aria-label="Pilih gelombang">
+            <h2 className="section-title">Gelombang kegiatan</h2>
             <div className="batch-selector-cards">
               {orderedBatches.map((b) => {
-                const bEntries = allBibEntries.filter((e) => e.batchId === b.id);
+                const bEntries = allBibEntries.filter(
+                  (e) => e.batchId === b.id
+                );
                 const bFinishes = allFinishEvents.filter(
                   (f) => f.batchId === b.id && f.status !== 'CANCELLED'
                 );
@@ -319,7 +340,7 @@ export const ResultsHistoryScreen: React.FC<ResultsHistoryScreenProps> = ({
                     onClick={() => setSelectedBatchId(b.id)}
                   >
                     <div className="batch-selector-card__top">
-                      <strong>Batch #{b.batchNumber}</strong>
+                      <strong className="batch-name">{getBatchName(b)}</strong>
                       <span
                         className={`status-badge status-badge--${b.status.toLowerCase()}`}
                       >
@@ -342,14 +363,23 @@ export const ResultsHistoryScreen: React.FC<ResultsHistoryScreenProps> = ({
 
           {/* Selected Batch Detailed Results */}
           {selectedBatch && (
-            <section className="card" aria-label={`Detail Hasil Batch #${selectedBatch.batchNumber}`}>
+            <section
+              className="card"
+              aria-label={`Hasil ${getBatchName(selectedBatch)}`}
+            >
               <div className="section-header-row">
                 <div>
-                  <h2 className="section-title">
-                    Rincian Hasil Batch #{selectedBatch.batchNumber}
+                  <h2 className="section-title batch-name">
+                    Hasil {getBatchName(selectedBatch)}
                   </h2>
                   <p className="helper-text">
-                    Status: <strong>{getBatchStatusLabel(selectedBatch.status, selectedBatch.recoveryRequired)}</strong>
+                    Status:{' '}
+                    <strong>
+                      {getBatchStatusLabel(
+                        selectedBatch.status,
+                        selectedBatch.recoveryRequired
+                      )}
+                    </strong>
                     {selectedBatch.startedAtWallClock &&
                       ` • Mulai: ${formatWallClockDateTime(selectedBatch.startedAtWallClock)}`}
                   </p>
@@ -357,9 +387,13 @@ export const ResultsHistoryScreen: React.FC<ResultsHistoryScreenProps> = ({
                 <button
                   type="button"
                   className="btn btn--small btn--secondary"
-                  onClick={() => void onReopenBatchToReview(selectedBatch)}
+                  onClick={() =>
+                    void onReopenBatchToReview(selectedBatch).catch(
+                      (error: Error) => setCorrectionError(error.message)
+                    )
+                  }
                 >
-                  Buka di Layar Tinjau
+                  Periksa gelombang
                 </button>
               </div>
 
@@ -370,13 +404,18 @@ export const ResultsHistoryScreen: React.FC<ResultsHistoryScreenProps> = ({
               )}
 
               {correctionSuccess && (
-                <div className="inline-alert inline-alert--success" role="status">
+                <div
+                  className="inline-alert inline-alert--success"
+                  role="status"
+                >
                   {correctionSuccess}
                 </div>
               )}
 
               {selectedBatchEntries.length === 0 ? (
-                <div className="empty-state">Tidak ada peserta pada batch ini.</div>
+                <div className="empty-state">
+                  Belum ada peserta pada gelombang ini.
+                </div>
               ) : (
                 <ul className="roster-list">
                   {selectedBatchEntries.map((entry, idx) => {
@@ -408,7 +447,8 @@ export const ResultsHistoryScreen: React.FC<ResultsHistoryScreenProps> = ({
                                   </span>
                                   {fin.correctionHistory.length > 0 && (
                                     <span className="audit-tag">
-                                      Dikoreksi ({fin.correctionHistory.length}x)
+                                      Dikoreksi ({fin.correctionHistory.length}
+                                      x)
                                     </span>
                                   )}
                                 </div>
@@ -444,16 +484,19 @@ export const ResultsHistoryScreen: React.FC<ResultsHistoryScreenProps> = ({
 
                         {isCorrecting && (
                           <form
-                            onSubmit={(e) => void handleSaveResultCorrection(e, entry)}
+                            onSubmit={(e) =>
+                              void handleSaveResultCorrection(e, entry)
+                            }
                             className="inline-identify-drawer"
                           >
                             <h4>
-                              Koreksi Tertera Audit untuk Nomor {entry.bibLabel} (Batch #{selectedBatch.batchNumber})
+                              Koreksi {entry.bibLabel} pada{' '}
+                              {getBatchName(selectedBatch)}
                             </h4>
                             <div className="roster-edit-row">
                               <div>
                                 <label className="field-label">
-                                  Urutan Finish di Batch #{selectedBatch.batchNumber}:
+                                  Urutan finish {getBatchName(selectedBatch)}
                                 </label>
                                 <select
                                   className="select-input"
@@ -469,7 +512,9 @@ export const ResultsHistoryScreen: React.FC<ResultsHistoryScreenProps> = ({
                                     }
                                   }}
                                 >
-                                  <option value="">-- Pilih Catatan Finish --</option>
+                                  <option value="">
+                                    -- Pilih Catatan Finish --
+                                  </option>
                                   {selectedBatchFinishes.map((f) => (
                                     <option key={f.id} value={f.id}>
                                       {formatSequenceLabel(f.sequence)} —{' '}
@@ -486,7 +531,9 @@ export const ResultsHistoryScreen: React.FC<ResultsHistoryScreenProps> = ({
                                   type="text"
                                   className="text-input"
                                   value={editElapsedInput}
-                                  onChange={(e) => setEditElapsedInput(e.target.value)}
+                                  onChange={(e) =>
+                                    setEditElapsedInput(e.target.value)
+                                  }
                                   placeholder="05:12.34"
                                 />
                               </div>
@@ -498,7 +545,9 @@ export const ResultsHistoryScreen: React.FC<ResultsHistoryScreenProps> = ({
                                   type="text"
                                   className="text-input"
                                   value={editReasonInput}
-                                  onChange={(e) => setEditReasonInput(e.target.value)}
+                                  onChange={(e) =>
+                                    setEditReasonInput(e.target.value)
+                                  }
                                   placeholder="Misal: Konfirmasi ulang catatan finish"
                                   required
                                 />
@@ -551,7 +600,8 @@ export const ResultsHistoryScreen: React.FC<ResultsHistoryScreenProps> = ({
                       <strong>{log.action}</strong>
                       <span>{formatWallClockDateTime(log.changedAt)}</span>
                     </div>
-                    {(log.oldValue !== undefined || log.newValue !== undefined) && (
+                    {(log.oldValue !== undefined ||
+                      log.newValue !== undefined) && (
                       <div className="audit-log-item__diff">
                         {log.oldValue !== undefined && log.oldValue !== null
                           ? `${String(log.oldValue)} → `

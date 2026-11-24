@@ -1,4 +1,4 @@
-import { BibColor, BatchStatus, FinishEventStatus, ParticipantStatus, RecordingMode } from './types';
+import { BibColor, BatchRecord, BatchStatus, FinishEventStatus, ParticipantStatus, RecordingMode } from './types';
 
 export interface BibColorMeta {
   color: BibColor;
@@ -168,6 +168,10 @@ export function formatWallClockDateTime(isoString?: string): string {
   } catch {
     return isoString;
   }
+}
+
+export function getBatchName(batch: Pick<BatchRecord, 'name' | 'batchNumber'>): string {
+  return batch.name?.trim() || `Gelombang #${batch.batchNumber}`;
 }
 
 export function getBatchStatusLabel(status: BatchStatus, recoveryRequired?: boolean): string {

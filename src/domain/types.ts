@@ -25,6 +25,7 @@ export interface BatchRecord {
   id: string;
   eventId: string;
   batchNumber: number;
+  name?: string;
   status: BatchStatus;
   recordingMode: RecordingMode;
   createdAt: string;
@@ -34,6 +35,7 @@ export interface BatchRecord {
   completedAt?: string;
   recoveryRequired?: boolean;
   timingSource?: TimingSource;
+  timingSessionId?: string;
   notes?: string;
 }
 
@@ -127,6 +129,24 @@ export interface BackupPayload {
   finishEvents: FinishEventRecord[];
   auditLogs: AuditLogRecord[];
   settings: AppSettingsRecord[];
+  pendingCaptures?: PendingCapture[];
+}
+
+export interface PendingCapture {
+  id: string;
+  batchId: string;
+  recordedAtMonotonicMs?: number;
+  recordedAtWallClock: string;
+  elapsedMs: number;
+  timingSource: TimingSource;
+  batchBibEntryId?: string;
+  error?: string;
+}
+
+export interface SavedCapture {
+  finishEvent: FinishEventRecord;
+  bibEntry?: BatchBibEntry;
+  batch?: BatchRecord;
 }
 
 export interface DerivedParticipantResult {

@@ -10,7 +10,7 @@ import {
 
 export const DB_NAME = 'run-timing-db';
 export const DB_VERSION = 1;
-export const BACKUP_SCHEMA_VERSION = 1;
+export const BACKUP_SCHEMA_VERSION = 2;
 
 export interface RunTimingDBSchema extends DBSchema {
   events: {
@@ -61,9 +61,17 @@ export interface RunTimingDBSchema extends DBSchema {
 
 let dbPromise: Promise<IDBPDatabase<RunTimingDBSchema>> | null = null;
 let simulatedWriteFailure: string | null = null;
+let writeLeaseExpires = Infinity;
+
+export function setWriteLease(expires: number): void {
+  writeLeaseExpires = expires;
+}
 
 export class StoragePersistenceError extends Error {
-  constructor(message: string, public readonly causeError?: unknown) {
+  constructor(
+    message: string,
+    public readonly causeError?: unknown
+  ) {
     super(message);
     this.name = 'StoragePersistenceError';
   }
@@ -74,6 +82,11 @@ export function setSimulatedWriteFailure(message: string | null): void {
 }
 
 export function checkWriteAllowed(): void {
+  if (writeLeaseExpires <= Date.now()) {
+    throw new StoragePersistenceError(
+      'Tab ini dalam mode baca. Gunakan tab pencatatan yang aktif.'
+    );
+  }
   if (simulatedWriteFailure) {
     throw new StoragePersistenceError(simulatedWriteFailure);
   }
@@ -94,17 +107,23 @@ export function getDb(): Promise<IDBPDatabase<RunTimingDBSchema>> {
           batchStore.createIndex('by-status', 'status');
         }
         if (!db.objectStoreNames.contains('batchBibEntries')) {
-          const bibStore = db.createObjectStore('batchBibEntries', { keyPath: 'id' });
+          const bibStore = db.createObjectStore('batchBibEntries', {
+            keyPath: 'id',
+          });
           bibStore.createIndex('by-batchId', 'batchId');
           bibStore.createIndex('by-eventId', 'eventId');
         }
         if (!db.objectStoreNames.contains('finishEvents')) {
-          const finishStore = db.createObjectStore('finishEvents', { keyPath: 'id' });
+          const finishStore = db.createObjectStore('finishEvents', {
+            keyPath: 'id',
+          });
           finishStore.createIndex('by-batchId', 'batchId');
           finishStore.createIndex('by-eventId', 'eventId');
         }
         if (!db.objectStoreNames.contains('auditLogs')) {
-          const auditStore = db.createObjectStore('auditLogs', { keyPath: 'id' });
+          const auditStore = db.createObjectStore('auditLogs', {
+            keyPath: 'id',
+          });
           auditStore.createIndex('by-eventId', 'eventId');
           auditStore.createIndex('by-batchId', 'batchId');
         }
@@ -129,7 +148,14 @@ export async function clearAllStores(): Promise<void> {
   checkWriteAllowed();
   const db = await getDb();
   const tx = db.transaction(
-    ['events', 'batches', 'batchBibEntries', 'finishEvents', 'auditLogs', 'settings'],
+    [
+      'events',
+      'batches',
+      'batchBibEntries',
+      'finishEvents',
+      'auditLogs',
+      'settings',
+    ],
     'readwrite'
   );
   await Promise.all([

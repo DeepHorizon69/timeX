@@ -1,443 +1,488 @@
-import { beforeEach, describe, expect, it } from 'vitest';
-import { render, screen, waitFor, within } from '@testing-library/react';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import {
+  act,
+  cleanup,
+  fireEvent,
+  render,
+  screen,
+  waitFor,
+  within,
+} from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { App } from '../App';
+import { clearAllStores, setSimulatedWriteFailure } from '../db/indexedDb';
 import {
-  clearAllStores,
-  resetDbConnectionForTests,
-  setSimulatedWriteFailure,
-} from '../db/indexedDb';
-import { clearActiveSessionBatchesForTests } from '../services/timekeeper';
-import { BatchRepository, FinishEventRepository } from '../db/repositories';
+  BatchRepository,
+  EventRepository,
+  FinishEventRepository,
+} from '../db/repositories';
 import { ExportService } from '../services/exportService';
+import {
+  clearActiveSessionBatchesForTests,
+  registerSessionStartedBatch,
+} from '../services/timekeeper';
+import {
+  getPendingCaptures,
+  restorePendingCaptures,
+  retryCaptures,
+} from '../services/captureSession';
 
-describe('Run Timing Full UI & Field Simulation Tests', () => {
+async function startGelombang(
+  user: ReturnType<typeof userEvent.setup>,
+  count = 1
+) {
+  await user.click(
+    await screen.findByRole('button', { name: 'Siapkan gelombang' })
+  );
+  for (let number = 1; number <= count; number++) {
+    await user.click(
+      await screen.findByRole('button', {
+        name: `Tambah P${String(number).padStart(2, '0')}`,
+      })
+    );
+  }
+  await waitFor(() =>
+    expect(screen.getByRole('button', { name: 'Siap start' })).toBeEnabled()
+  );
+  await user.click(screen.getByRole('button', { name: 'Siap start' }));
+  await user.click(
+    within(await screen.findByRole('dialog')).getByRole('button', {
+      name: 'Mulai sekarang',
+    })
+  );
+  await screen.findByRole('button', { name: /Catat finish/i });
+}
+
+async function currentBatch() {
+  const event = await EventRepository.getActiveEvent();
+  return (await BatchRepository.listBatchesByEvent(event!.id))[0];
+}
+
+describe('TimeX operator workflow', () => {
   beforeEach(async () => {
     setSimulatedWriteFailure(null);
     clearActiveSessionBatchesForTests();
-    await resetDbConnectionForTests();
+    sessionStorage.clear();
     await clearAllStores();
   });
 
-  it('executes complete field simulation with 12 bibs, rapid finishes, identification, correction, DNF, CSV/JSON export, and bib reuse in Batch 2', async () => {
+  afterEach(async () => {
+    cleanup();
+    setSimulatedWriteFailure(null);
+    await retryCaptures();
+    vi.restoreAllMocks();
+  });
+
+  it('renames a saved preparation and keeps the name and bib after reopening', async () => {
+    const user = userEvent.setup();
+    const { unmount } = render(<App />);
+    await user.click(
+      await screen.findByRole('button', { name: 'Siapkan gelombang' })
+    );
+    await user.click(await screen.findByRole('button', { name: 'Tambah P01' }));
+    await screen.findByText('P01 ditambahkan');
+    const batch = await currentBatch();
+    await user.click(screen.getByRole('button', { name: 'Kembali' }));
+
+    const card = within(
+      screen.getByRole('region', { name: 'Langkah berikutnya' })
+    );
+    const editButton = () => card.getByRole('button', { name: 'Edit nama' });
+    const openEditor = () => user.click(editButton());
+    await openEditor();
+    let input = card.getByRole('textbox', { name: 'Nama gelombang' });
+    expect(input).toHaveValue('Gelombang #1');
+    expect(input).toHaveFocus();
+    await user.clear(input);
+    expect(card.getByRole('button', { name: 'Simpan nama' })).toBeDisabled();
+    await user.keyboard('{Escape}');
+    expect(editButton()).toHaveFocus();
+
+    await openEditor();
+    input = card.getByRole('textbox', { name: 'Nama gelombang' });
+    await user.clear(input);
+    await user.type(input, '  Lari 5K Pagi  ');
+    setSimulatedWriteFailure('Penyimpanan sedang tidak tersedia.');
+    await user.keyboard('{Enter}');
+    expect(await card.findByRole('alert')).toHaveTextContent(
+      'Penyimpanan sedang tidak tersedia.'
+    );
+    expect(await BatchRepository.getBatchById(batch.id)).not.toHaveProperty(
+      'name'
+    );
+
+    setSimulatedWriteFailure(null);
+    await user.click(card.getByRole('button', { name: 'Simpan nama' }));
+    await card.findByRole('heading', { name: 'Lari 5K Pagi' });
+    await waitFor(() => expect(editButton()).toHaveFocus());
+    expect(await BatchRepository.getBatchById(batch.id)).toMatchObject({
+      batchNumber: batch.batchNumber,
+      status: batch.status,
+      name: 'Lari 5K Pagi',
+    });
+    const backup = await ExportService.validateAndPreviewBackupJson(
+      await ExportService.buildJsonBackupString()
+    );
+    expect(backup.payload.batches[0].name).toBe('Lari 5K Pagi');
+
+    unmount();
+    render(<App />);
+    await screen.findByRole('heading', { name: 'Lari 5K Pagi' });
+    await user.click(screen.getByRole('button', { name: 'Lanjutkan persiapan' }));
+    expect(
+      screen.getByRole('heading', { name: 'Lari 5K Pagi', level: 1 })
+    ).toBeInTheDocument();
+    expect(await BatchRepository.listBibEntriesByBatch(batch.id)).toMatchObject([
+      { bibLabel: 'P01' },
+    ]);
+  });
+
+  it('prepares 12 bibs, captures rapid finishes, identifies without blocking capture, corrects time and saves DNF with exports and bib reuse', async () => {
     const user = userEvent.setup();
     render(<App />);
-
-    // 1. Wait for dashboard to load
-    await waitFor(() => {
+    await startGelombang(user, 12);
+    const batch = await currentBatch();
+    const finishButton = screen.getByRole('button', { name: /Catat finish/i });
+    const transactions = vi.spyOn(IDBDatabase.prototype, 'transaction');
+    act(() => {
+      for (let index = 0; index < 3; index++) fireEvent.click(finishButton);
+    });
+    await screen.findByRole('button', { name: 'Isi bib F-003' });
+    expect(
+      transactions.mock.calls.filter(([stores, mode]) => {
+        const names = typeof stores === 'string' ? [stores] : Array.from(stores);
+        return (
+          mode !== 'readwrite' &&
+          (names.includes('finishEvents') || names.includes('batchBibEntries'))
+        );
+      })
+    ).toHaveLength(0);
+    transactions.mockRestore();
+    expect(
+      screen.getAllByRole('button', { name: /^Isi bib F-/ }).map(
+        (button) => button.getAttribute('aria-label')
+      )
+    ).toEqual(['Isi bib F-003', 'Isi bib F-002', 'Isi bib F-001']);
+    await waitFor(async () =>
       expect(
-        screen.getByText(/Data tersimpan di perangkat ini/i)
-      ).toBeInTheDocument();
-    });
-
-    // Click Buat Batch Baru (Batch #1)
-    await user.click(
-      screen.getByRole('button', { name: /Buat Batch Baru \(Batch #1\)/i })
+        (await FinishEventRepository.listFinishEventsByBatch(batch.id)).length
+      ).toBe(3)
     );
-
-    // 2. Add 12 bib entries across multiple colors
-    await waitFor(() => {
-      expect(screen.getByText(/1\. Pilih Warna Bib/i)).toBeInTheDocument();
-    });
-
-    // Switch to Grid Cepat 1-50 for rapid entry
-    await user.click(screen.getByRole('tab', { name: /Grid Cepat 1–50/i }));
-
-    // Add Putih 1, 2, 3
-    await user.click(screen.getByRole('button', { name: 'Tambah P01' }));
-    await user.click(screen.getByRole('button', { name: 'Tambah P02' }));
-    await user.click(screen.getByRole('button', { name: 'Tambah P03' }));
-
-    // Select Biru and add 10, 11, 12
-    await user.click(screen.getByRole('radio', { name: /Biru/i }));
-    await user.click(screen.getByRole('button', { name: 'Tambah B10' }));
-    await user.click(screen.getByRole('button', { name: 'Tambah B11' }));
-    await user.click(screen.getByRole('button', { name: 'Tambah B12' }));
-
-    // Select Merah and add 5, 6, 7
-    await user.click(screen.getByRole('radio', { name: /Merah/i }));
-    await user.click(screen.getByRole('button', { name: 'Tambah M05' }));
-    await user.click(screen.getByRole('button', { name: 'Tambah M06' }));
-    await user.click(screen.getByRole('button', { name: 'Tambah M07' }));
-
-    // Select Kuning and add 20, 21, 22 via Keypad
-    await user.click(screen.getByRole('radio', { name: /Kuning/i }));
-    await user.click(screen.getByRole('tab', { name: /Keypad \/ Ketik/i }));
-    const numInput = screen.getByLabelText(/Nomor Bib \(1 sampai 50\)/i);
-
-    await user.type(numInput, '20');
-    await user.click(screen.getByRole('button', { name: /Tambah Nomor/i }));
-
-    await user.type(numInput, '21');
-    await user.click(screen.getByRole('button', { name: /Tambah Nomor/i }));
-
-    await user.type(numInput, '22');
-    await user.click(screen.getByRole('button', { name: /Tambah Nomor/i }));
-
-    // Attempt duplicate K22 -> must reject with clear message
-    await user.type(numInput, '22');
-    await user.click(screen.getByRole('button', { name: /Tambah Nomor/i }));
-    await waitFor(() => {
-      expect(screen.getByRole('alert')).toHaveTextContent(/sudah terdaftar/i);
-    });
-
-    // Verify 12 participants in roster
-    const startBtn1 = await screen.findByRole('button', {
-      name: /MULAI BATCH #1 \(12 Peserta\)/i,
-    });
-    expect(startBtn1).toBeInTheDocument();
-
-    // 3. Start Batch #1
-    await user.click(startBtn1);
     await user.click(
-      await screen.findByRole('button', { name: /Mulai Batch Sekarang/i })
+      await screen.findByRole('button', { name: 'Isi bib F-001' })
     );
-
-    // 4. Record 4 finishes in quick succession using CATAT FINISH without modals
-    await waitFor(() => {
+    await user.click(screen.getByRole('button', { name: 'Pilih P01' }));
+    await user.click(screen.getByRole('button', { name: /Catat finish/i }));
+    await waitFor(() =>
       expect(
-        screen.getByRole('button', { name: /CATAT FINISH/i })
-      ).toBeInTheDocument();
-    });
-
-    const catatBtn = screen.getByRole('button', { name: /CATAT FINISH/i });
-    await user.click(catatBtn);
-    await user.click(catatBtn);
-    await user.click(catatBtn);
-    await user.click(catatBtn);
-
-    await waitFor(() => {
-      expect(screen.getByText('F-004')).toBeInTheDocument();
-      expect(screen.getByText('F-001')).toBeInTheDocument();
-    });
-
-    // 5. Identify F-001 as B12 (initially mistaken), F-002 as M07, F-003 as P01
-    // Find F-001 item and click Identifikasi Nomor
-    const queueList = screen.getByRole('region', {
-      name: /Antrean Catatan Waktu Finish/i,
-    });
-    const f001Row = within(queueList).getByText('F-001').closest('li')!;
-    await user.click(
-      within(f001Row).getByRole('button', { name: /Identifikasi Nomor/i })
+        within(screen.getByRole('button', { name: 'Isi bib F-001' })).getByText(
+          'P01'
+        )
+      ).toBeInTheDocument()
     );
-    await user.click(within(f001Row).getByRole('button', { name: /B12/i }));
-
-    // Correct F-001 mistaken identity from B12 to B10
-    await waitFor(() => {
+    await waitFor(() =>
+      expect(screen.getByRole('button', { name: 'Pilih P02' })).toBeEnabled()
+    );
+    await user.click(await screen.findByRole('button', { name: 'Pilih P02' }));
+    await waitFor(() =>
       expect(
-        within(f001Row).getByRole('button', { name: /Ubah/i })
-      ).toBeInTheDocument();
-    });
-    await user.click(within(f001Row).getByRole('button', { name: /Ubah/i }));
-    await user.click(within(f001Row).getByRole('button', { name: /B10/i }));
-
-    // Identify F-002 as B12 (now available again!)
-    const f002Row = within(queueList).getByText('F-002').closest('li')!;
-    await user.click(
-      within(f002Row).getByRole('button', { name: /Identifikasi Nomor/i })
+        within(screen.getByRole('button', { name: 'Isi bib F-002' })).getByText(
+          'P02'
+        )
+      ).toBeInTheDocument()
     );
-    await user.click(within(f002Row).getByRole('button', { name: /B12/i }));
-
-    // Identify F-003 as M07
-    const f003Row = within(queueList).getByText('F-003').closest('li')!;
-    await user.click(
-      within(f003Row).getByRole('button', { name: /Identifikasi Nomor/i })
+    await waitFor(() =>
+      expect(screen.getByRole('button', { name: 'Pilih P03' })).toBeEnabled()
     );
-    await user.click(within(f003Row).getByRole('button', { name: /M07/i }));
-
-    // Leave F-004 unidentified for now and move to Review screen
-    await user.click(screen.getByRole('button', { name: /Tinjau Hasil/i }));
-    await user.click(
-      screen.getByRole('button', { name: /Lanjut ke Tinjau Hasil/i })
-    );
-
-    // 6. On Review screen, identify F-004 as P01 and mark remaining waiting participants as DNF
-    await waitFor(() => {
-      expect(screen.getByText(/Tinjau Hasil Batch #1/i)).toBeInTheDocument();
-    });
-
-    const reviewFinishSection = screen.getByRole('region', {
-      name: /Daftar Catatan Waktu Finish/i,
-    });
-    const revF004Row = within(reviewFinishSection)
-      .getByText('F-004')
-      .closest('li')!;
-    await user.click(
-      within(revF004Row).getByRole('button', { name: /Pilih Nomor/i })
-    );
-    await user.click(within(revF004Row).getByRole('button', { name: /P01/i }));
-
-    // Bulk mark remaining 8 waiting participants as DNF
-    const bulkDnfBtn = await screen.findByRole('button', {
-      name: /Tandai Semua Sisa \(8\) DNF/i,
-    });
-    await waitFor(() => {
-      expect(bulkDnfBtn).not.toBeDisabled();
-    });
-    await user.click(bulkDnfBtn);
-
-    // Complete Batch #1
-    await waitFor(() => {
+    await user.click(await screen.findByRole('button', { name: 'Pilih P03' }));
+    await waitFor(() =>
       expect(
-        screen.getByRole('button', { name: /Selesaikan Batch #1/i })
-      ).not.toBeDisabled();
-    });
-    await user.click(
-      screen.getByRole('button', { name: /Selesaikan Batch #1/i })
+        within(screen.getByRole('button', { name: 'Isi bib F-003' })).getByText(
+          'P03'
+        )
+      ).toBeInTheDocument()
     );
     await user.click(
-      screen.getByRole('button', { name: /Ya, Selesaikan Batch/i })
+      await screen.findByRole('button', { name: 'Isi bib F-004' })
     );
-
-    // 7. Verify Results screen opens and shows Batch #1 as Selesai
-    await waitFor(() => {
-      expect(screen.getByText(/Rincian Hasil Batch #1/i)).toBeInTheDocument();
-    });
-
-    // Save Batch #1 B12 elapsed time for comparison after Batch #2
-    const batchesAfter1 = await BatchRepository.listBatchesByEvent(
-      (await BatchRepository.listBatchesByEvent((await ExportService.buildJsonBackup()).events[0].id))[0].eventId
+    await user.click(screen.getByRole('button', { name: 'Pilih P04' }));
+    await waitFor(() =>
+      expect(
+        within(screen.getByRole('button', { name: 'Isi bib F-004' })).getByText(
+          'P04'
+        )
+      ).toBeInTheDocument()
     );
-    const batch1Id = batchesAfter1[0].id;
-    const batch1ResBefore = await FinishEventRepository.getBatchResults(batch1Id);
-    const b12Batch1ElapsedBefore = batch1ResBefore.results.find(
-      (r) => r.entry.bibLabel === 'B12'
-    )?.finishEvent?.elapsedMs;
-    expect(b12Batch1ElapsedBefore).toBeDefined();
-
-    // 8. Go to Export screen and verify CSV & JSON preview generation
-    await user.click(screen.getByRole('button', { name: /Ekspor\/Backup/i }));
+    await user.click(screen.getByRole('button', { name: 'Akhiri pencatatan' }));
     await user.click(
-      screen.getByRole('button', { name: /Tampilkan Pratinjau CSV/i })
+      within(screen.getByRole('dialog')).getByRole('button', {
+        name: 'Periksa hasil',
+      })
     );
-    const csvTextarea = await screen.findByLabelText(/Isi CSV \(UTF-8\):/i);
-    expect((csvTextarea as HTMLTextAreaElement).value).toContain('B12');
-    expect((csvTextarea as HTMLTextAreaElement).value).toContain('DNF');
-
+    await user.click(
+      await screen.findByRole('button', { name: 'Semua hasil' })
+    );
+    await user.click(
+      screen.getAllByRole('button', { name: 'Koreksi waktu' })[0]
+    );
+    await user.clear(screen.getByLabelText('Waktu (MM:SS.cc)'));
+    await user.type(screen.getByLabelText('Waktu (MM:SS.cc)'), '05:12.34');
+    await user.type(
+      within(screen.getByRole('dialog')).getByLabelText('Alasan koreksi'),
+      'Konfirmasi catatan operator'
+    );
+    await user.click(screen.getByRole('button', { name: 'Simpan koreksi' }));
+    await waitFor(() =>
+      expect(screen.queryByRole('dialog')).not.toBeInTheDocument()
+    );
+    await user.click(screen.getByRole('button', { name: 'Tandai sisa DNF' }));
+    expect(
+      within(screen.getByRole('dialog')).getByRole('heading')
+    ).toHaveTextContent('8 peserta DNF');
+    await user.click(
+      within(screen.getByRole('dialog')).getByRole('button', {
+        name: 'Konfirmasi',
+      })
+    );
+    await waitFor(() =>
+      expect(screen.queryByRole('dialog')).not.toBeInTheDocument()
+    );
+    await user.click(
+      screen.getByRole('button', { name: 'Simpan dan lanjutkan' })
+    );
+    await user.click(
+      within(screen.getByRole('dialog')).getByRole('button', {
+        name: 'Konfirmasi',
+      })
+    );
+    await screen.findByText('Gelombang #1 tersimpan.');
+    expect(screen.getByRole('button', { name: 'Unduh backup' })).toBeEnabled();
+    const results = await FinishEventRepository.getBatchResults(batch.id);
+    expect(
+      results.roster.filter((entry) => entry.status === 'DNF')
+    ).toHaveLength(8);
+    const corrected = results.finishEvents.find(
+      (finish) => finish.sequence === 1
+    )!;
+    expect(corrected.elapsedMs).toBe(312340);
+    expect(corrected.correctionHistory).toHaveLength(1);
+    expect(await ExportService.buildCsvString()).toContain('05:12.34');
+    const backup = await ExportService.buildJsonBackup();
+    expect(backup.schemaVersion).toBe(2);
+    await ExportService.validateAndPreviewBackupJson(
+      JSON.stringify({
+        ...backup,
+        schemaVersion: 1,
+        pendingCaptures: undefined,
+      })
+    );
+    await user.click(screen.getByRole('button', { name: 'Perangkat' }));
     await user.click(
       screen.getByRole('button', { name: /Tampilkan JSON Backup/i })
     );
-    const jsonTextarea = await screen.findByLabelText(/Isi Backup JSON:/i);
-    expect((jsonTextarea as HTMLTextAreaElement).value).toContain(
-      '"appName": "Run Timing"'
-    );
-
-    // 9. Return to Beranda and create Batch #2 reusing B12 and P01
-    await user.click(screen.getByRole('button', { name: /← Beranda/i }));
+    expect(
+      (
+        (await screen.findByLabelText(
+          /Isi Backup JSON/i
+        )) as HTMLTextAreaElement
+      ).value
+    ).toContain('Run Timing');
+    await user.click(screen.getByRole('button', { name: 'Hasil' }));
     await user.click(
-      await screen.findByRole('button', { name: /Buat Batch Baru \(Batch #2\)/i })
+      await screen.findByRole('button', {
+        name: 'Siapkan gelombang berikutnya',
+      })
     );
-
-    await user.click(
-      await screen.findByRole('tab', { name: /Grid Cepat 1–50/i })
-    );
-    await user.click(screen.getByRole('button', { name: 'Tambah P01' }));
-    await user.click(screen.getByRole('radio', { name: /Biru/i }));
-    await user.click(screen.getByRole('button', { name: 'Tambah B12' }));
-
-    await user.click(
-      await screen.findByRole('button', { name: /MULAI BATCH #2 \(2 Peserta\)/i })
-    );
-    await user.click(
-      await screen.findByRole('button', { name: /Mulai Batch Sekarang/i })
-    );
-
-    await waitFor(() => {
-      expect(screen.getByText(/BATCH #2/i)).toBeInTheDocument();
-    });
-
-    // Verify Batch #1 B12 result is completely unchanged
-    const batch1ResAfter = await FinishEventRepository.getBatchResults(batch1Id);
-    const b12Batch1ElapsedAfter = batch1ResAfter.results.find(
-      (r) => r.entry.bibLabel === 'B12'
-    )?.finishEvent?.elapsedMs;
-    expect(b12Batch1ElapsedAfter).toBe(b12Batch1ElapsedBefore);
+    await user.click(await screen.findByRole('button', { name: 'Tambah P01' }));
+    await screen.findByRole('button', { name: 'P01 sudah ditambahkan' });
+    await screen.findByText('P01 ditambahkan');
+    expect(
+      (await FinishEventRepository.getBatchResults(batch.id)).finishEvents.find(
+        (finish) => finish.sequence === 1
+      )?.elapsedMs
+    ).toBe(312340);
   });
 
-  it('shows Pulihkan Batch workflow after page reload while batch is RUNNING, and handles storage write failures visibly with retry', async () => {
+  it('retains failed finish across navigation and retries the original ID and timestamp once', async () => {
     const user = userEvent.setup();
-    const { unmount } = render(<App />);
-
-    await waitFor(() => {
-      expect(
-        screen.getByRole('button', { name: /Buat Batch Baru/i })
-      ).toBeInTheDocument();
-    });
-
-    await user.click(
-      screen.getByRole('button', { name: /Buat Batch Baru/i })
+    render(<App />);
+    await startGelombang(user);
+    const batch = await currentBatch();
+    setSimulatedWriteFailure('Penyimpanan penuh');
+    await user.click(screen.getByRole('button', { name: /Catat finish/i }));
+    await screen.findByText('1 finish belum tersimpan');
+    const pending = { ...getPendingCaptures()[0] };
+    expect(sessionStorage.getItem('timex-pending-captures-v2')).toContain(
+      pending.id
     );
+    await user.click(screen.getByRole('button', { name: 'Kegiatan' }));
     await user.click(
-      await screen.findByRole('tab', { name: /Grid Cepat 1–50/i })
+      await screen.findByRole('button', { name: 'Lanjutkan pencatatan' })
     );
-    await user.click(screen.getByRole('button', { name: 'Tambah P01' }));
-
-    await user.click(
-      await screen.findByRole('button', { name: /MULAI BATCH #1 \(1 Peserta\)/i })
-    );
-    await user.click(
-      await screen.findByRole('button', { name: /Mulai Batch Sekarang/i })
-    );
-
-    await waitFor(() => {
-      expect(
-        screen.getByRole('button', { name: /CATAT FINISH/i })
-      ).toBeInTheDocument();
-    });
-
-    // Simulate IndexedDB write failure when tapping CATAT FINISH
-    setSimulatedWriteFailure('Simulasi penyimpanan penuh');
-    await user.click(screen.getByRole('button', { name: /CATAT FINISH/i }));
-
-    // Verify blocking error banner appears and does NOT falsely claim saved
-    await waitFor(() => {
-      expect(
-        screen.getByText(/PERINGATAN KRITIS: 1 Catatan Finish Belum Tersimpan/i)
-      ).toBeInTheDocument();
-    });
-
-    // Restore IndexedDB write capability and click retry button
+    expect(screen.getByText('1 finish belum tersimpan')).toBeInTheDocument();
+    expect(
+      screen.getByRole('button', { name: 'Akhiri pencatatan' })
+    ).toBeDisabled();
     setSimulatedWriteFailure(null);
-    await user.click(
-      screen.getByRole('button', { name: /Simpan Ulang Sekarang \(1 Catatan\)/i })
+    await user.click(screen.getByRole('button', { name: 'Simpan ulang' }));
+    await screen.findByRole('button', { name: 'Isi bib F-001' });
+    const finishes = await FinishEventRepository.listFinishEventsByBatch(
+      batch.id
     );
-
-    await waitFor(() => {
-      expect(
-        screen.queryByText(/PERINGATAN KRITIS/i)
-      ).not.toBeInTheDocument();
-      expect(screen.getByText('F-001')).toBeInTheDocument();
+    expect(finishes).toHaveLength(1);
+    expect(finishes[0]).toMatchObject({
+      id: pending.id,
+      elapsedMs: pending.elapsedMs,
+      recordedAtWallClock: pending.recordedAtWallClock,
     });
+    await act(async () => {
+      restorePendingCaptures([pending]);
+      await retryCaptures();
+    });
+    expect(screen.getAllByRole('button', { name: 'Isi bib F-001' })).toHaveLength(
+      1
+    );
+    expect(
+      await FinishEventRepository.listFinishEventsByBatch(batch.id)
+    ).toHaveLength(1);
+  });
 
-    // Now simulate browser reload: unmount App, clear in-memory session batch IDs, remount App
-    unmount();
+  it('recovers through review and reports the wall clock fallback honestly', async () => {
+    const user = userEvent.setup();
+    const first = render(<App />);
+    await startGelombang(user);
+    first.unmount();
     clearActiveSessionBatchesForTests();
     render(<App />);
-
-    // Verify dashboard shows "Perlu Pemulihan" and "Pulihkan Batch #1"
-    await waitFor(() => {
-      expect(
-        screen.getByRole('button', { name: /Pulihkan Batch #1/i })
-      ).toBeInTheDocument();
-    });
-
-    await user.click(screen.getByRole('button', { name: /Pulihkan Batch #1/i }));
-
-    // Verify explicit Pulihkan Batch #1 screen appears with all 3 recovery options
-    await waitFor(() => {
-      expect(
-        screen.getByRole('heading', { name: /Pulihkan Batch #1/i })
-      ).toBeInTheDocument();
-      expect(
-        screen.getByRole('button', {
-          name: /Lanjutkan Batch dengan Jam Perangkat \(Fallback\)/i,
-        })
-      ).toBeInTheDocument();
-      expect(
-        screen.getByRole('button', {
-          name: /Tandai Perlu Diperiksa & Tinjau Hasil Batch/i,
-        })
-      ).toBeInTheDocument();
-    });
-  });
-
-  it('maintains stable card order in Direct-Card mode, prevents duplicate finish taps, and restores JSON backup via UI', async () => {
-    const user = userEvent.setup();
-    render(<App />);
-
-    await waitFor(() => {
-      expect(
-        screen.getByRole('button', { name: /Buat Batch Baru/i })
-      ).toBeInTheDocument();
-    });
-
-    // Select Direct Card mode on Dashboard
     await user.click(
-      screen.getByRole('radio', { name: /Ketuk Kartu Nomor Langsung/i })
-    );
-    await user.click(
-      screen.getByRole('button', { name: /Buat Batch Baru/i })
-    );
-
-    await user.click(
-      await screen.findByRole('tab', { name: /Grid Cepat 1–50/i })
-    );
-    await user.click(screen.getByRole('button', { name: 'Tambah P01' }));
-    await user.click(screen.getByRole('button', { name: 'Tambah P02' }));
-    await user.click(screen.getByRole('button', { name: 'Tambah P03' }));
-
-    await user.click(
-      await screen.findByRole('button', { name: /MULAI BATCH #1 \(3 Peserta\)/i })
-    );
-    await user.click(
-      await screen.findByRole('button', { name: /Mulai Batch Sekarang/i })
-    );
-
-    const cardRegion = await screen.findByRole('region', {
-      name: /Ketuk Kartu Peserta/i,
-    });
-
-    // Tap P02 first (middle card)
-    const p02CardBefore = within(cardRegion).getByRole('button', {
-      name: /P02/i,
-    });
-    await user.click(p02CardBefore);
-
-    await waitFor(() => {
-      expect(within(cardRegion).getByText(/F-001/i)).toBeInTheDocument();
-    });
-
-    // Verify card order remains P01, P02, P03 (stable order, no automatic reordering)
-    const allCardLabels = within(cardRegion)
-      .getAllByRole('button')
-      .filter((btn) => btn.classList.contains('participant-tap-card'))
-      .map((btn) => btn.textContent ?? '');
-    expect(allCardLabels[0]).toContain('P01');
-    expect(allCardLabels[1]).toContain('P02');
-    expect(allCardLabels[2]).toContain('P03');
-
-    // Tapping P02 a second time must NOT create F-002; instead it opens the undo confirmation dialog
-    await user.click(within(cardRegion).getByRole('button', { name: /P02/i }));
-    await waitFor(() => {
-      expect(
-        screen.getByRole('dialog', { name: /Urungkan \/ Batalkan F-001/i })
-      ).toBeInTheDocument();
-    });
-    await user.click(screen.getByRole('button', { name: /Kembali/i }));
-    expect(
-      within(cardRegion).queryByText(/F-002 • Sudah Finish/i)
-    ).not.toBeInTheDocument();
-    expect(
-      within(cardRegion).getByRole('button', {
-        name: /\+ Finish Tanpa Nomor \(F-002\)/i,
-      })
-    ).toBeInTheDocument();
-
-    // Backup JSON, clear stores, and restore via UI
-    const backupJson = await ExportService.buildJsonBackupString();
-    await clearAllStores();
-
-    await user.click(screen.getByRole('button', { name: /Ekspor\/Backup/i }));
-    const manualTextarea = await screen.findByLabelText(
-      /Atau Tempel Isi JSON Backup:/i
-    );
-    await user.clear(manualTextarea);
-    await user.click(manualTextarea);
-    await user.paste(backupJson);
-
-    await user.click(
-      screen.getByRole('button', { name: /Periksa & Tampilkan Pratinjau Impor/i })
+      await screen.findByRole('button', { name: 'Pulihkan sesi' })
     );
     await user.click(
       await screen.findByRole('button', {
-        name: /Ya, Pulihkan Data Backup Ini/i,
+        name: 'Tutup pencatatan dan periksa hasil',
       })
     );
+    await user.click(
+      await screen.findByRole('button', { name: 'Kembali ke stopwatch' })
+    );
+    await user.click(
+      within(screen.getByRole('dialog')).getByRole('button', {
+        name: 'Buka stopwatch',
+      })
+    );
+    await user.click(
+      await screen.findByRole('button', {
+        name: 'Lanjutkan dengan jam perangkat',
+      })
+    );
+    expect(
+      await screen.findByText('Pemulihan · jam perangkat')
+    ).toBeInTheDocument();
+    await user.click(screen.getByRole('button', { name: /Catat finish/i }));
+    await screen.findByRole('button', { name: 'Isi bib F-001' });
+    const batch = await currentBatch();
+    expect(
+      (await FinishEventRepository.listFinishEventsByBatch(batch.id))[0]
+        .timingSource
+    ).toBe('WALL_CLOCK_FALLBACK');
+  });
 
-    await waitFor(() => {
-      expect(
-        screen.getByText(/Backup JSON berhasil dipulihkan/i)
-      ).toBeInTheDocument();
+  it('explicitly defers unresolved records and permits the next gelombang', async () => {
+    const user = userEvent.setup();
+    render(<App />);
+    await startGelombang(user, 2);
+    const batch = await currentBatch();
+    await user.click(screen.getByRole('button', { name: /Catat finish/i }));
+    await screen.findByRole('button', { name: 'Isi bib F-001' });
+    await user.click(screen.getByRole('button', { name: 'Akhiri pencatatan' }));
+    await user.click(
+      within(screen.getByRole('dialog')).getByRole('button', {
+        name: 'Periksa hasil',
+      })
+    );
+    await user.click(
+      await screen.findByRole('button', { name: 'Simpan untuk diperiksa' })
+    );
+    await user.click(
+      within(screen.getByRole('dialog')).getByRole('button', {
+        name: 'Konfirmasi',
+      })
+    );
+    await screen.findByText('Gelombang #1 tersimpan.');
+    const result = await FinishEventRepository.getBatchResults(batch.id);
+    expect(screen.getByRole('button', { name: 'Unduh backup' })).toBeEnabled();
+    expect(result.batch.status).toBe('NEEDS_REVIEW');
+    expect(
+      result.roster.every((entry) => entry.status === 'NEEDS_REVIEW')
+    ).toBe(true);
+    expect(result.finishEvents[0].status).toBe('NEEDS_REVIEW');
+    await user.click(
+      screen.getByRole('button', { name: 'Siapkan gelombang berikutnya' })
+    );
+    expect(
+      await screen.findByRole('heading', { name: 'Gelombang #2' })
+    ).toBeInTheDocument();
+  });
+
+  it('keeps legacy direct cards stable, prevents duplicate taps and manages dialog keyboard focus', async () => {
+    const event = await EventRepository.ensureDefaultEvent();
+    const batch = await BatchRepository.createBatch(event.id, 'DIRECT_CARD');
+    await BatchRepository.addBibToBatch({
+      batchId: batch.id,
+      bibColor: 'BLUE',
+      bibNumber: 12,
     });
+    await BatchRepository.addBibToBatch({
+      batchId: batch.id,
+      bibColor: 'WHITE',
+      bibNumber: 1,
+    });
+    await BatchRepository.startBatch({
+      batchId: batch.id,
+      startedAtWallClock: new Date().toISOString(),
+      startedAtMonotonicMs: performance.now(),
+    });
+    registerSessionStartedBatch(batch.id);
+    const user = userEvent.setup();
+    render(<App />);
+    await user.click(
+      await screen.findByRole('button', { name: 'Lanjutkan pencatatan' })
+    );
+    await user.click(screen.getByRole('button', { name: 'Peserta' }));
+    const before = screen
+      .getAllByRole('button', { name: /belum finish/ })
+      .map((button) => button.getAttribute('aria-label')?.split(' ')[0]);
+    await user.click(screen.getByRole('button', { name: 'B12 belum finish' }));
+    await user.click(
+      await screen.findByRole('button', { name: 'B12 sudah finish' })
+    );
+    const dialog = screen.getByRole('dialog');
+    expect(within(dialog).getByRole('button', { name: 'Batal' })).toHaveFocus();
+    await user.tab({ shift: true });
+    expect(
+      within(dialog).getByRole('button', { name: 'Batalkan finish' })
+    ).toHaveFocus();
+    await user.keyboard('{Escape}');
+    expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
+    expect(
+      screen.getByRole('button', { name: 'B12 sudah finish' })
+    ).toHaveFocus();
+    const after = screen
+      .getAllByRole('button', { name: /(?:belum|sudah) finish/ })
+      .map((button) => button.getAttribute('aria-label')?.split(' ')[0]);
+    expect(after).toEqual(before);
+    expect(
+      await FinishEventRepository.listFinishEventsByBatch(batch.id)
+    ).toHaveLength(1);
+
+    await user.click(screen.getByRole('button', { name: 'B12 sudah finish' }));
+    await user.click(
+      within(screen.getByRole('dialog')).getByRole('button', {
+        name: 'Batalkan finish',
+      })
+    );
+    await screen.findByRole('button', { name: 'B12 belum finish' });
+    await user.click(screen.getByRole('button', { name: 'Antrean finish' }));
+    expect(screen.getByText('Dibatalkan')).toBeInTheDocument();
   });
 });

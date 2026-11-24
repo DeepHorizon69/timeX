@@ -5,6 +5,7 @@ import {
   BatchRecord,
   EventRecord,
   FinishEventRecord,
+  PendingCapture,
 } from '../domain/types';
 import {
   BIB_COLOR_MAP,
@@ -22,6 +23,12 @@ import {
 } from '../db/indexedDb';
 import { sortBibEntriesByBibCode } from '../db/repositories';
 import {
+  assertCapturesSaved,
+  getPendingCaptures,
+  isPendingCapture,
+  restorePendingCaptures,
+} from './captureSession';
+import {
   buildReportFilename,
   buildValidatedReportDataset,
   generateExcelReportBuffer,
@@ -38,7 +45,9 @@ export {
 };
 export type { ReportFilterOptions, ValidatedReportDataset };
 
-export function escapeCsvField(value: string | number | null | undefined): string {
+export function escapeCsvField(
+  value: string | number | null | undefined
+): string {
   if (value === null || value === undefined) return '';
   const str = String(value);
   if (/[",\r\n]/.test(str)) {
@@ -88,14 +97,49 @@ export interface BackupPreviewSummary {
 }
 
 export const ExportService = {
-  async buildCsvString(options?: { eventId?: string; batchId?: string }): Promise<string> {
+  async validateRescueJson(raw: string): Promise<PendingCapture[] | null> {
+    const parsed = JSON.parse(raw) as {
+      appName?: string;
+      pendingCaptures?: unknown;
+    };
+    if (parsed?.appName !== 'TimeX Rescue') return null;
+    if (
+      !Array.isArray(parsed.pendingCaptures) ||
+      !parsed.pendingCaptures.every(isPendingCapture)
+    ) {
+      throw new Error('File penyelamatan berisi catatan yang tidak valid.');
+    }
+    const db = await getDb();
+    for (const item of parsed.pendingCaptures) {
+      const batch = await db.get('batches', item.batchId);
+      if (!batch)
+        throw new Error(
+          'Pulihkan backup kegiatan yang sesuai sebelum mengimpor catatan darurat.'
+        );
+      if (item.batchBibEntryId) {
+        const entry = await db.get('batchBibEntries', item.batchBibEntryId);
+        if (entry?.batchId !== item.batchId)
+          throw new Error(
+            'Bib catatan darurat tidak ditemukan pada gelombang ini.'
+          );
+      }
+    }
+    return parsed.pendingCaptures;
+  },
+
+  async buildCsvString(options?: {
+    eventId?: string;
+    batchId?: string;
+  }): Promise<string> {
     const db = await getDb();
     const allEvents = await db.getAll('events');
     const allBatches = await db.getAll('batches');
     const allEntries = await db.getAll('batchBibEntries');
     const allFinishes = await db.getAll('finishEvents');
 
-    const eventMap = new Map<string, EventRecord>(allEvents.map((e) => [e.id, e]));
+    const eventMap = new Map<string, EventRecord>(
+      allEvents.map((e) => [e.id, e])
+    );
     const filteredBatches = allBatches
       .filter((b) => {
         if (options?.batchId) return b.id === options.batchId;
@@ -120,7 +164,9 @@ export const ExportService = {
       const linkedFinishIds = new Set<string>();
 
       for (const entry of batchEntries) {
-        const fin = entry.finishEventId ? finishMap.get(entry.finishEventId) : undefined;
+        const fin = entry.finishEventId
+          ? finishMap.get(entry.finishEventId)
+          : undefined;
         if (fin) {
           linkedFinishIds.add(fin.id);
         }
@@ -213,15 +259,21 @@ export const ExportService = {
 
   async buildJsonBackup(): Promise<BackupPayload> {
     const db = await getDb();
-    const [events, batches, batchBibEntries, finishEvents, auditLogs, settings] =
-      await Promise.all([
-        db.getAll('events'),
-        db.getAll('batches'),
-        db.getAll('batchBibEntries'),
-        db.getAll('finishEvents'),
-        db.getAll('auditLogs'),
-        db.getAll('settings'),
-      ]);
+    const [
+      events,
+      batches,
+      batchBibEntries,
+      finishEvents,
+      auditLogs,
+      settings,
+    ] = await Promise.all([
+      db.getAll('events'),
+      db.getAll('batches'),
+      db.getAll('batchBibEntries'),
+      db.getAll('finishEvents'),
+      db.getAll('auditLogs'),
+      db.getAll('settings'),
+    ]);
 
     return {
       schemaVersion: BACKUP_SCHEMA_VERSION,
@@ -232,7 +284,10 @@ export const ExportService = {
       batchBibEntries,
       finishEvents,
       auditLogs,
-      settings,
+      settings: settings.filter(
+        (setting) => !setting.key.startsWith('_timex_')
+      ),
+      pendingCaptures: getPendingCaptures(),
     };
   },
 
@@ -241,7 +296,9 @@ export const ExportService = {
     return JSON.stringify(payload, null, 2);
   },
 
-  async validateAndPreviewBackupJson(rawJson: string): Promise<BackupPreviewSummary> {
+  async validateAndPreviewBackupJson(
+    rawJson: string
+  ): Promise<BackupPreviewSummary> {
     let parsed: unknown;
     try {
       parsed = JSON.parse(rawJson);
@@ -259,6 +316,7 @@ export const ExportService = {
     }
     if (
       typeof obj.schemaVersion !== 'number' ||
+      !Number.isInteger(obj.schemaVersion) ||
       obj.schemaVersion < 1 ||
       obj.schemaVersion > BACKUP_SCHEMA_VERSION
     ) {
@@ -274,7 +332,9 @@ export const ExportService = {
       !Array.isArray(obj.finishEvents) ||
       !Array.isArray(obj.auditLogs)
     ) {
-      throw new Error('Data di dalam file backup tidak lengkap (tabel utama hilang).');
+      throw new Error(
+        'Data di dalam file backup tidak lengkap (tabel utama hilang).'
+      );
     }
 
     // Validate each record has essential fields
@@ -288,7 +348,8 @@ export const ExportService = {
         !b ||
         typeof b.id !== 'string' ||
         typeof b.eventId !== 'string' ||
-        typeof b.batchNumber !== 'number'
+        typeof b.batchNumber !== 'number' ||
+        (b.name !== undefined && typeof b.name !== 'string')
       ) {
         throw new Error('Data batch di dalam backup tidak valid.');
       }
@@ -316,23 +377,86 @@ export const ExportService = {
       }
     }
 
+    const events = obj.events as EventRecord[];
+    const batches = obj.batches as BatchRecord[];
+    const entries = obj.batchBibEntries as BatchBibEntry[];
+    const finishes = obj.finishEvents as FinishEventRecord[];
+    const logs = obj.auditLogs as AuditLogRecord[];
+    for (const records of [events, batches, entries, finishes, logs]) {
+      if (
+        records.some((record) => !record || typeof record.id !== 'string') ||
+        new Set(records.map((record) => record.id)).size !== records.length
+      ) {
+        throw new Error('Backup memiliki ID kosong atau duplikat.');
+      }
+    }
+    const eventIds = new Set(events.map((record) => record.id));
+    const batchMap = new Map(batches.map((record) => [record.id, record]));
+    const entryMap = new Map(entries.map((record) => [record.id, record]));
+    const finishMap = new Map(finishes.map((record) => [record.id, record]));
+    if (
+      batches.some((record) => !eventIds.has(record.eventId)) ||
+      entries.some(
+        (record) =>
+          batchMap.get(record.batchId)?.eventId !== record.eventId ||
+          (record.finishEventId &&
+            (finishMap.get(record.finishEventId)?.batchBibEntryId !==
+              record.id ||
+              finishMap.get(record.finishEventId)?.batchId !== record.batchId))
+      ) ||
+      finishes.some(
+        (record) =>
+          batchMap.get(record.batchId)?.eventId !== record.eventId ||
+          !Number.isFinite(record.elapsedMs) ||
+          record.elapsedMs < 0 ||
+          (record.batchBibEntryId &&
+            (entryMap.get(record.batchBibEntryId)?.finishEventId !==
+              record.id ||
+              entryMap.get(record.batchBibEntryId)?.batchId !== record.batchId))
+      )
+    ) {
+      throw new Error(
+        'Hubungan kegiatan, gelombang, peserta, atau finish di backup tidak konsisten.'
+      );
+    }
+    if (
+      obj.pendingCaptures !== undefined &&
+      (!Array.isArray(obj.pendingCaptures) ||
+        !obj.pendingCaptures.every(
+          (record) =>
+            isPendingCapture(record) &&
+            batchMap.has(record.batchId) &&
+            (!record.batchBibEntryId ||
+              entryMap.get(record.batchBibEntryId)?.batchId === record.batchId)
+        ))
+    ) {
+      throw new Error('Catatan finish tertunda di backup tidak valid.');
+    }
+
     const db = await getDb();
-    const [existingEvents, existingBatches, existingFinishes] = await Promise.all([
-      db.count('events'),
-      db.count('batches'),
-      db.count('finishEvents'),
-    ]);
+    const [existingEvents, existingBatches, existingFinishes] =
+      await Promise.all([
+        db.count('events'),
+        db.count('batches'),
+        db.count('finishEvents'),
+      ]);
 
     const payload: BackupPayload = {
       schemaVersion: obj.schemaVersion,
       appName: 'Run Timing',
-      exportedAt: typeof obj.exportedAt === 'string' ? obj.exportedAt : new Date().toISOString(),
+      exportedAt:
+        typeof obj.exportedAt === 'string'
+          ? obj.exportedAt
+          : new Date().toISOString(),
       events: obj.events as EventRecord[],
       batches: obj.batches as BatchRecord[],
       batchBibEntries: obj.batchBibEntries as BatchBibEntry[],
       finishEvents: obj.finishEvents as FinishEventRecord[],
       auditLogs: obj.auditLogs as AuditLogRecord[],
-      settings: Array.isArray(obj.settings) ? (obj.settings as BackupPayload['settings']) : [],
+      settings: Array.isArray(obj.settings)
+        ? (obj.settings as BackupPayload['settings'])
+        : [],
+      pendingCaptures: obj.pendingCaptures as BackupPayload['pendingCaptures'],
     };
 
     return {
@@ -351,13 +475,37 @@ export const ExportService = {
   },
 
   async importValidatedBackup(payload: BackupPayload): Promise<void> {
+    assertCapturesSaved();
+    const checked = await this.validateAndPreviewBackupJson(
+      JSON.stringify(payload)
+    );
+    payload = checked.payload;
     try {
       checkWriteAllowed();
       const db = await getDb();
       const tx = db.transaction(
-        ['events', 'batches', 'batchBibEntries', 'finishEvents', 'auditLogs', 'settings'],
+        [
+          'events',
+          'batches',
+          'batchBibEntries',
+          'finishEvents',
+          'auditLogs',
+          'settings',
+        ],
         'readwrite'
       );
+
+      const active = await tx
+        .objectStore('batches')
+        .index('by-status')
+        .getAll('RUNNING');
+      if (active.some((batch) => !batch.recoveryRequired)) {
+        await tx.done;
+        throw new Error(
+          'Akhiri pencatatan gelombang aktif sebelum memulihkan backup.'
+        );
+      }
+      const writerLease = await tx.objectStore('settings').get('_timex_writer');
 
       await Promise.all([
         tx.objectStore('events').clear(),
@@ -375,14 +523,12 @@ export const ExportService = {
       }
       for (const b of payload.batches) {
         // Any RUNNING batch imported from JSON backup has no valid monotonic origin in this page
-        const normalizedBatch: BatchRecord =
-          b.status === 'RUNNING'
-            ? {
-                ...b,
-                recoveryRequired: true,
-                startedAtMonotonicMs: undefined,
-              }
-            : b;
+        const normalizedBatch: BatchRecord = {
+          ...b,
+          recoveryRequired: b.status === 'RUNNING' || b.recoveryRequired,
+          startedAtMonotonicMs: undefined,
+          timingSessionId: undefined,
+        };
         await tx.objectStore('batches').put(normalizedBatch);
       }
       for (const entry of payload.batchBibEntries) {
@@ -398,8 +544,10 @@ export const ExportService = {
         await tx.objectStore('auditLogs').put(log);
       }
       for (const setting of payload.settings) {
-        await tx.objectStore('settings').put(setting);
+        if (!setting.key.startsWith('_timex_'))
+          await tx.objectStore('settings').put(setting);
       }
+      if (writerLease) await tx.objectStore('settings').put(writerLease);
 
       const activeEventId = payload.events[0]?.id ?? 'system';
       await tx.objectStore('auditLogs').put({
@@ -413,6 +561,7 @@ export const ExportService = {
       });
 
       await tx.done;
+      restorePendingCaptures(payload.pendingCaptures ?? []);
     } catch (err) {
       if (err instanceof StoragePersistenceError) throw err;
       throw new StoragePersistenceError(

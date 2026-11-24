@@ -3,10 +3,19 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
-    <meta name="theme-color" content="#0f172a" />
-    <meta name="description" content="Run Timing — Pencatatan Waktu Lari Lokal (Mobile-First)" />
+    <meta name="theme-color" content="#f8fafc" />
+    <script>
+      (() => {
+        let theme = 'light';
+        try { if (window.localStorage.getItem('timex-theme') === 'dark') theme = 'dark'; } catch {}
+        document.documentElement.dataset.theme = theme;
+        document.documentElement.style.colorScheme = theme;
+        document.querySelector('meta[name="theme-color"]').content = theme === 'dark' ? '#0b1220' : '#f8fafc';
+      })();
+    </script>
+    <meta name="description" content="TimeX, pencatatan waktu lomba di perangkat. Siapkan bib, catat finish, dan periksa hasil." />
     <link rel="manifest" href="/manifest.webmanifest" />
-    <title>Run Timing — Pencatat Waktu Lari</title>
+    <title>TimeX · Pencatat waktu lomba</title>
   </head>
   <body>
     <div id="root"></div>

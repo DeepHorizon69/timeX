@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react';
 import { BatchRecord, TimingSource } from '../domain/types';
+import { generateId } from '../domain/utils';
 
 /**
  * Tracks batches started during the current browser page session.
@@ -7,6 +8,7 @@ import { BatchRecord, TimingSource } from '../domain/types';
  * any RUNNING batch in IndexedDB whose monotonic origin is no longer valid.
  */
 const activeSessionBatchIds = new Set<string>();
+export const timingSessionId = generateId('session');
 
 export function registerSessionStartedBatch(batchId: string): void {
   activeSessionBatchIds.add(batchId);
@@ -17,6 +19,10 @@ export function getActiveSessionBatchIds(): Set<string> {
 }
 
 export function clearActiveSessionBatchesForTests(): void {
+  clearActiveSessionBatches();
+}
+
+export function clearActiveSessionBatches(): void {
   activeSessionBatchIds.clear();
 }
 
@@ -30,16 +36,25 @@ export interface CapturedFinishTiming {
 /**
  * Captures finish timing immediately on operator tap before any async work.
  */
-export function captureFinishTimingNow(batch: BatchRecord): CapturedFinishTiming {
+export function captureFinishTimingNow(
+  batch: BatchRecord
+): CapturedFinishTiming {
+  if (batch.recoveryRequired || batch.status !== 'RUNNING') {
+    throw new Error('Pulihkan sesi waktu sebelum mencatat finish.');
+  }
   const monoNow = performance.now();
   const wallNow = new Date().toISOString();
 
   if (
     batch.timingSource !== 'WALL_CLOCK_FALLBACK' &&
+    (!batch.timingSessionId || batch.timingSessionId === timingSessionId) &&
     typeof batch.startedAtMonotonicMs === 'number' &&
     !batch.recoveryRequired
   ) {
-    const elapsedMs = Math.max(0, Math.round(monoNow - batch.startedAtMonotonicMs));
+    const elapsedMs = Math.max(
+      0,
+      Math.round(monoNow - batch.startedAtMonotonicMs)
+    );
     return {
       recordedAtMonotonicMs: monoNow,
       recordedAtWallClock: wallNow,
@@ -48,7 +63,10 @@ export function captureFinishTimingNow(batch: BatchRecord): CapturedFinishTiming
     };
   }
 
-  if (batch.startedAtWallClock) {
+  if (
+    batch.timingSource === 'WALL_CLOCK_FALLBACK' &&
+    batch.startedAtWallClock
+  ) {
     const startWallMs = Date.parse(batch.startedAtWallClock);
     const currentWallMs = Date.parse(wallNow);
     const elapsedMs = Number.isFinite(startWallMs)
@@ -62,15 +80,14 @@ export function captureFinishTimingNow(batch: BatchRecord): CapturedFinishTiming
     };
   }
 
-  return {
-    recordedAtMonotonicMs: monoNow,
-    recordedAtWallClock: wallNow,
-    elapsedMs: 0,
-    timingSource: 'MONOTONIC',
-  };
+  throw new Error(
+    'Sumber waktu sesi terputus. Pulihkan gelombang terlebih dahulu.'
+  );
 }
 
-export function computeCurrentBatchElapsedMs(batch: BatchRecord | null | undefined): number {
+export function computeCurrentBatchElapsedMs(
+  batch: BatchRecord | null | undefined
+): number {
   if (!batch || batch.status !== 'RUNNING' || batch.recoveryRequired) {
     return 0;
   }
@@ -78,7 +95,10 @@ export function computeCurrentBatchElapsedMs(batch: BatchRecord | null | undefin
     batch.timingSource !== 'WALL_CLOCK_FALLBACK' &&
     typeof batch.startedAtMonotonicMs === 'number'
   ) {
-    return Math.max(0, Math.round(performance.now() - batch.startedAtMonotonicMs));
+    return Math.max(
+      0,
+      Math.round(performance.now() - batch.startedAtMonotonicMs)
+    );
   }
   if (batch.startedAtWallClock) {
     const startMs = Date.parse(batch.startedAtWallClock);
@@ -89,7 +109,9 @@ export function computeCurrentBatchElapsedMs(batch: BatchRecord | null | undefin
   return 0;
 }
 
-export function useBatchLiveTimer(batch: BatchRecord | null | undefined): number {
+export function useBatchLiveTimer(
+  batch: BatchRecord | null | undefined
+): number {
   const [elapsedMs, setElapsedMs] = useState<number>(() =>
     computeCurrentBatchElapsedMs(batch)
   );
@@ -143,9 +165,11 @@ export function useScreenWakeLock(active: boolean): {
       try {
         if ('wakeLock' in navigator && navigator.wakeLock) {
           sentinel = await navigator.wakeLock.request('screen');
-          if (!cancelled) {
-            setIsLocked(true);
+          if (cancelled) {
+            await sentinel.release();
+            return;
           }
+          setIsLocked(true);
           sentinel.addEventListener('release', () => {
             if (!cancelled) setIsLocked(false);
           });

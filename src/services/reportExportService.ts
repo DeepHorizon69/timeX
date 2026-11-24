@@ -1,11 +1,6 @@
-import ExcelJS from 'exceljs';
-import { jsPDF } from 'jspdf';
-import autoTable from 'jspdf-autotable';
-import {
-  BatchBibEntry,
-  EventRecord,
-  FinishEventRecord,
-} from '../domain/types';
+import type ExcelJS from 'exceljs';
+import type { jsPDF } from 'jspdf';
+import { BatchBibEntry, EventRecord, FinishEventRecord } from '../domain/types';
 import {
   BIB_COLOR_MAP,
   formatElapsedMs,
@@ -114,7 +109,9 @@ export async function buildValidatedReportDataset(
     db.getAll('finishEvents'),
   ]);
 
-  const eventMap = new Map<string, EventRecord>(allEvents.map((e) => [e.id, e]));
+  const eventMap = new Map<string, EventRecord>(
+    allEvents.map((e) => [e.id, e])
+  );
 
   const filteredBatches = [...allBatches]
     .filter((b) => {
@@ -134,14 +131,13 @@ export async function buildValidatedReportDataset(
   } else if (options?.batchId && filteredBatches[0]) {
     primaryEvent = eventMap.get(filteredBatches[0].eventId);
   } else {
-    primaryEvent =
-      allEvents.find((e) => e.status === 'ACTIVE') ?? allEvents[0];
+    primaryEvent = allEvents.find((e) => e.status === 'ACTIVE') ?? allEvents[0];
   }
 
   const eventTitle =
     options && !options.eventId && !options.batchId && allEvents.length > 1
       ? `Semua Acara (${allEvents.length} Kegiatan)`
-      : primaryEvent?.name ?? 'Laporan Lari';
+      : (primaryEvent?.name ?? 'Laporan Lari');
   const eventDate =
     primaryEvent?.eventDate ?? new Date().toISOString().slice(0, 10);
 
@@ -358,9 +354,7 @@ export async function buildValidatedReportDataset(
       const noteParts: string[] = [];
       if (linkedFinish?.notes) noteParts.push(linkedFinish.notes);
       if (linkedFinish && linkedFinish.correctionHistory.length > 0) {
-        noteParts.push(
-          `Dikoreksi ${linkedFinish.correctionHistory.length}x`
-        );
+        noteParts.push(`Dikoreksi ${linkedFinish.correctionHistory.length}x`);
       }
       if (
         (linkedFinish?.timingSource ?? batch.timingSource) ===
@@ -465,7 +459,7 @@ export async function buildValidatedReportDataset(
         recordType: 'FINISH_EVENT',
         bibLabel: targetEntry?.bibLabel ?? 'BELUM_DIIDENTIFIKASI',
         bibColorName: targetEntry
-          ? BIB_COLOR_MAP[targetEntry.bibColor]?.nameId ?? ''
+          ? (BIB_COLOR_MAP[targetEntry.bibColor]?.nameId ?? '')
           : '-',
         bibNumber: targetEntry?.bibNumber ?? null,
         participantName: targetEntry?.participantName?.trim() ?? '',
@@ -568,8 +562,13 @@ export async function buildValidatedReportDataset(
  */
 export async function generateExcelReportBuffer(
   options?: ReportFilterOptions
-): Promise<{ buffer: ArrayBuffer; dataset: ValidatedReportDataset; filename: string }> {
+): Promise<{
+  buffer: ArrayBuffer;
+  dataset: ValidatedReportDataset;
+  filename: string;
+}> {
   const dataset = await buildValidatedReportDataset(options);
+  const { default: ExcelJS } = await import('exceljs');
   const workbook = new ExcelJS.Workbook();
   workbook.creator = 'Run Timing Web App';
   workbook.created = new Date(dataset.generatedAtIso);
@@ -592,7 +591,12 @@ export async function generateExcelReportBuffer(
   wsValid.mergeCells('A1:K1');
   const titleCell = wsValid.getCell('A1');
   titleCell.value = `LAPORAN HASIL LARI — ${dataset.eventTitle.toUpperCase()}`;
-  titleCell.font = { name: 'Calibri', size: 14, bold: true, color: { argb: 'FFFFFFFF' } };
+  titleCell.font = {
+    name: 'Calibri',
+    size: 14,
+    bold: true,
+    color: { argb: 'FFFFFFFF' },
+  };
   titleCell.fill = {
     type: 'pattern',
     pattern: 'solid',
@@ -603,12 +607,23 @@ export async function generateExcelReportBuffer(
 
   // Metadata Rows (Rows 2-4)
   wsValid.mergeCells('A2:K2');
-  wsValid.getCell('A2').value = `Tanggal Acara: ${dataset.eventDate}   |   Cakupan Batch: ${dataset.batchScopeLabel}   |   Tanggal Cetak Laporan: ${dataset.generatedAtFormatted}`;
-  wsValid.getCell('A2').font = { name: 'Calibri', size: 10, bold: true, color: { argb: 'FF1E293B' } };
+  wsValid.getCell('A2').value =
+    `Tanggal Acara: ${dataset.eventDate}   |   Cakupan Batch: ${dataset.batchScopeLabel}   |   Tanggal Cetak Laporan: ${dataset.generatedAtFormatted}`;
+  wsValid.getCell('A2').font = {
+    name: 'Calibri',
+    size: 10,
+    bold: true,
+    color: { argb: 'FF1E293B' },
+  };
 
   wsValid.mergeCells('A3:K3');
-  wsValid.getCell('A3').value = `Ringkasan Tervalidasi: Total Peserta Terdaftar: ${dataset.summary.totalRegisteredParticipants}  •  Finish Valid: ${dataset.summary.totalValidFinishers}  •  DNS: ${dataset.summary.totalDns}  •  DNF: ${dataset.summary.totalDnf}  •  Perlu Diperiksa: ${dataset.summary.totalNeedsReview}`;
-  wsValid.getCell('A3').font = { name: 'Calibri', size: 10, color: { argb: 'FF334155' } };
+  wsValid.getCell('A3').value =
+    `Ringkasan Tervalidasi: Total Peserta Terdaftar: ${dataset.summary.totalRegisteredParticipants}  •  Finish Valid: ${dataset.summary.totalValidFinishers}  •  DNS: ${dataset.summary.totalDns}  •  DNF: ${dataset.summary.totalDnf}  •  Perlu Diperiksa: ${dataset.summary.totalNeedsReview}`;
+  wsValid.getCell('A3').font = {
+    name: 'Calibri',
+    size: 10,
+    color: { argb: 'FF334155' },
+  };
 
   wsValid.mergeCells('A4:K4');
   wsValid.getCell('A4').value =
@@ -657,13 +672,22 @@ export async function generateExcelReportBuffer(
   headerRow.values = validHeaders;
   headerRow.height = 24;
   headerRow.eachCell((cell) => {
-    cell.font = { name: 'Calibri', size: 11, bold: true, color: { argb: 'FFFFFFFF' } };
+    cell.font = {
+      name: 'Calibri',
+      size: 11,
+      bold: true,
+      color: { argb: 'FFFFFFFF' },
+    };
     cell.fill = {
       type: 'pattern',
       pattern: 'solid',
       fgColor: { argb: 'FF1D4ED8' },
     };
-    cell.alignment = { vertical: 'middle', horizontal: 'center', wrapText: true };
+    cell.alignment = {
+      vertical: 'middle',
+      horizontal: 'center',
+      wrapText: true,
+    };
     cell.border = thinBorder;
   });
 
@@ -707,8 +731,8 @@ export async function generateExcelReportBuffer(
           colNumber === 9
             ? 'center'
             : colNumber === 10
-            ? 'right'
-            : 'left',
+              ? 'right'
+              : 'left',
       };
     });
   });
@@ -744,7 +768,12 @@ export async function generateExcelReportBuffer(
   wsReview.mergeCells('A1:K1');
   const revTitle = wsReview.getCell('A1');
   revTitle.value = `DAFTAR DATA PERLU DIPERIKSA / BELUM DISELESAIKAN — ${dataset.eventTitle.toUpperCase()}`;
-  revTitle.font = { name: 'Calibri', size: 13, bold: true, color: { argb: 'FFFFFFFF' } };
+  revTitle.font = {
+    name: 'Calibri',
+    size: 13,
+    bold: true,
+    color: { argb: 'FFFFFFFF' },
+  };
   revTitle.fill = {
     type: 'pattern',
     pattern: 'solid',
@@ -754,7 +783,8 @@ export async function generateExcelReportBuffer(
   wsReview.getRow(1).height = 26;
 
   wsReview.mergeCells('A2:K2');
-  wsReview.getCell('A2').value = `Tanggal Acara: ${dataset.eventDate}   |   Cakupan Batch: ${dataset.batchScopeLabel}   |   Tanggal Cetak Laporan: ${dataset.generatedAtFormatted}`;
+  wsReview.getCell('A2').value =
+    `Tanggal Acara: ${dataset.eventDate}   |   Cakupan Batch: ${dataset.batchScopeLabel}   |   Tanggal Cetak Laporan: ${dataset.generatedAtFormatted}`;
   wsReview.getCell('A2').font = { name: 'Calibri', size: 10, bold: true };
 
   wsReview.mergeCells('A3:K3');
@@ -790,13 +820,22 @@ export async function generateExcelReportBuffer(
   revHeaderRow.values = reviewHeaders;
   revHeaderRow.height = 24;
   revHeaderRow.eachCell((cell) => {
-    cell.font = { name: 'Calibri', size: 11, bold: true, color: { argb: 'FFFFFFFF' } };
+    cell.font = {
+      name: 'Calibri',
+      size: 11,
+      bold: true,
+      color: { argb: 'FFFFFFFF' },
+    };
     cell.fill = {
       type: 'pattern',
       pattern: 'solid',
       fgColor: { argb: 'FFD97706' },
     };
-    cell.alignment = { vertical: 'middle', horizontal: 'center', wrapText: true };
+    cell.alignment = {
+      vertical: 'middle',
+      horizontal: 'center',
+      wrapText: true,
+    };
     cell.border = thinBorder;
   });
 
@@ -832,7 +871,7 @@ export async function generateExcelReportBuffer(
       cell.alignment = {
         vertical: 'middle',
         horizontal:
-          colNumber >= 3 && colNumber <= 8 || colNumber === 10
+          (colNumber >= 3 && colNumber <= 8) || colNumber === 10
             ? 'center'
             : 'left',
       };
@@ -883,8 +922,16 @@ export async function generateExcelReportBuffer(
  */
 export async function generatePdfReportBytes(
   options?: ReportFilterOptions
-): Promise<{ bytes: Uint8Array; dataset: ValidatedReportDataset; filename: string }> {
+): Promise<{
+  bytes: Uint8Array;
+  dataset: ValidatedReportDataset;
+  filename: string;
+}> {
   const dataset = await buildValidatedReportDataset(options);
+  const [{ jsPDF }, { default: autoTable }] = await Promise.all([
+    import('jspdf'),
+    import('jspdf-autotable'),
+  ]);
   const doc = new jsPDF({
     orientation: 'portrait',
     unit: 'mm',

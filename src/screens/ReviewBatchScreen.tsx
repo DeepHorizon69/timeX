@@ -1,4 +1,4 @@
-import React, { useMemo, useState } from 'react';
+import { useState } from 'react';
 import {
   BatchBibEntry,
   BatchRecord,
@@ -8,9 +8,7 @@ import {
 import {
   formatElapsedMs,
   formatSequenceLabel,
-  formatWallClockTime,
-  getBatchStatusLabel,
-  getFinishEventStatusLabel,
+  getBatchName,
   getParticipantStatusLabel,
   parseElapsedString,
 } from '../domain/utils';
@@ -22,32 +20,34 @@ interface ReviewBatchScreenProps {
   roster: BatchBibEntry[];
   finishEvents: FinishEventRecord[];
   onIdentifyFinish: (
-    finishEventId: string,
-    batchBibEntryId: string,
+    finishId: string,
+    entryId: string,
     reason?: string
   ) => Promise<void>;
   onUnassignOrMarkFinish: (
-    finishEventId: string,
-    targetStatus: 'UNIDENTIFIED' | 'NEEDS_REVIEW',
+    id: string,
+    status: 'UNIDENTIFIED' | 'NEEDS_REVIEW',
     reason?: string
   ) => Promise<void>;
-  onCancelFinish: (finishEventId: string, reason?: string) => Promise<void>;
+  onCancelFinish: (id: string, reason?: string) => Promise<void>;
   onCorrectFinishTime: (
-    finishEventId: string,
-    newElapsedMs: number,
+    id: string,
+    ms: number,
     reason: string
   ) => Promise<void>;
   onMarkParticipantStatus: (
-    batchBibEntryId: string,
+    id: string,
     status: Exclude<ParticipantStatus, 'FINISHED'>,
     reason?: string
   ) => Promise<void>;
+  onBulkMarkWaiting: (ids: string[], status: 'DNS' | 'DNF') => Promise<void>;
+  onDeferReview: (notes?: string) => Promise<void>;
   onReturnToRunning: () => Promise<void>;
   onCompleteBatch: (notes?: string) => Promise<void>;
   onBackHome: () => void;
 }
 
-export const ReviewBatchScreen: React.FC<ReviewBatchScreenProps> = ({
+export function ReviewBatchScreen({
   batch,
   roster,
   finishEvents,
@@ -56,803 +56,480 @@ export const ReviewBatchScreen: React.FC<ReviewBatchScreenProps> = ({
   onCancelFinish,
   onCorrectFinishTime,
   onMarkParticipantStatus,
+  onBulkMarkWaiting,
+  onDeferReview,
   onReturnToRunning,
   onCompleteBatch,
   onBackHome,
-}) => {
-  const [selectedFinishForBib, setSelectedFinishForBib] = useState<string | null>(
-    null
+}: ReviewBatchScreenProps) {
+  const [filter, setFilter] = useState<'ISSUES' | 'ALL'>('ISSUES');
+  const [editing, setEditing] = useState<FinishEventRecord | null>(null);
+  const [time, setTime] = useState('');
+  const [reason, setReason] = useState('');
+  const [notes, setNotes] = useState(batch.notes ?? '');
+  const [error, setError] = useState<string | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [confirm, setConfirm] = useState<
+    'complete' | 'defer' | 'reopen' | 'DNS' | 'DNF' | null
+  >(null);
+  const [bulkIds, setBulkIds] = useState<string[]>([]);
+  const active = [...finishEvents]
+    .filter((finish) => finish.status !== 'CANCELLED')
+    .sort((a, b) => a.sequence - b.sequence);
+  const waiting = roster.filter((entry) => entry.status === 'WAITING');
+  const unidentified = active.filter(
+    (finish) => finish.status === 'UNIDENTIFIED'
   );
-  const [reassignReason, setReassignReason] = useState<string>('');
-
-  // Timestamp correction modal/inline state
-  const [correctingTimeFinish, setCorrectingTimeFinish] =
-    useState<FinishEventRecord | null>(null);
-  const [newTimeInput, setNewTimeInput] = useState<string>('');
-  const [timeCorrectionReason, setTimeCorrectionReason] = useState<string>('');
-
-  // Completion & Reopen confirmation
-  const [completionNotes, setCompletionNotes] = useState<string>(batch.notes ?? '');
-  const [confirmCompleteOpen, setConfirmCompleteOpen] = useState<boolean>(false);
-  const [confirmReopenOpen, setConfirmReopenOpen] = useState<boolean>(false);
-  const [errorMessage, setErrorMessage] = useState<string | null>(null);
-  const [statusMessage, setStatusMessage] = useState<string | null>(null);
-  const [isBusy, setIsBusy] = useState<boolean>(false);
-
-  const bibMap = useMemo(
-    () => new Map<string, BatchBibEntry>(roster.map((r) => [r.id, r])),
-    [roster]
-  );
-
-  const finishMap = useMemo(
-    () => new Map<string, FinishEventRecord>(finishEvents.map((f) => [f.id, f])),
-    [finishEvents]
-  );
-
-  // Ordered by sequence ascending for review clarity
-  const orderedFinishEvents = useMemo(
-    () => [...finishEvents].sort((a, b) => a.sequence - b.sequence),
-    [finishEvents]
-  );
-
-  const activeFinishes = useMemo(
-    () => orderedFinishEvents.filter((f) => f.status !== 'CANCELLED'),
-    [orderedFinishEvents]
-  );
-
-  const identifiedCount = useMemo(
-    () => activeFinishes.filter((f) => f.status === 'IDENTIFIED').length,
-    [activeFinishes]
-  );
-
-  const unidentifiedFinishes = useMemo(
-    () => activeFinishes.filter((f) => f.status === 'UNIDENTIFIED'),
-    [activeFinishes]
-  );
-
-  const needsReviewFinishes = useMemo(
-    () => activeFinishes.filter((f) => f.status === 'NEEDS_REVIEW'),
-    [activeFinishes]
-  );
-
-  const waitingParticipants = useMemo(
-    () => roster.filter((r) => r.status === 'WAITING'),
-    [roster]
-  );
-
-  const specialStatusParticipants = useMemo(
-    () =>
-      roster.filter(
-        (r) =>
-          r.status === 'DNS' || r.status === 'DNF' || r.status === 'NEEDS_REVIEW'
-      ),
-    [roster]
-  );
-
-  // Detect closely spaced finish events (< 800ms apart) as a helpful data quality warning
-  const closeFinishPairs = useMemo(() => {
-    const pairs: string[] = [];
-    for (let i = 1; i < activeFinishes.length; i++) {
-      const prev = activeFinishes[i - 1];
-      const curr = activeFinishes[i];
-      const diff = Math.abs(curr.elapsedMs - prev.elapsedMs);
-      if (diff <= 800) {
-        pairs.push(
-          `${formatSequenceLabel(prev.sequence)} & ${formatSequenceLabel(
-            curr.sequence
-          )} (selisih ${diff} ms)`
+  const unresolved = unidentified.length + waiting.length;
+  const closeIds = new Set<string>();
+  for (let index = 1; index < active.length; index++) {
+    if (
+      Math.abs(active[index].elapsedMs - active[index - 1].elapsedMs) <= 800
+    ) {
+      closeIds.add(active[index].id);
+      closeIds.add(active[index - 1].id);
+    }
+  }
+  const visible =
+    filter === 'ALL'
+      ? [...finishEvents].sort((a, b) => a.sequence - b.sequence)
+      : active.filter(
+          (finish) => finish.status !== 'IDENTIFIED' || closeIds.has(finish.id)
         );
-      }
-    }
-    return pairs;
-  }, [activeFinishes]);
-
-  const dataQualityWarnings = useMemo(() => {
-    const warnings: string[] = [];
-    if (unidentifiedFinishes.length > 0) {
-      warnings.push(
-        `Ada ${unidentifiedFinishes.length} catatan finish yang belum diidentifikasi. Pilih nomor bib, tandai Perlu Diperiksa, atau batalkan.`
-      );
-    }
-    if (waitingParticipants.length > 0) {
-      warnings.push(
-        `Ada ${waitingParticipants.length} peserta yang masih berstatus Belum Finish (${waitingParticipants
-          .map((w) => w.bibLabel)
-          .join(', ')}). Hubungkan ke waktu finish atau tandai DNS / DNF / Perlu Diperiksa.`
-      );
-    }
-    if (batch.timingSource === 'WALL_CLOCK_FALLBACK') {
-      warnings.push(
-        'Batch ini sempat menggunakan mode pemulihan jam perangkat (Wall-Clock Fallback) setelah halaman dimuat ulang.'
-      );
-    }
-    if (closeFinishPairs.length > 0) {
-      warnings.push(
-        `Terdapat ketukan finish yang sangat berdekatan: ${closeFinishPairs.join(
-          '; '
-        )}. Pastikan urutan nomor bib sudah sesuai.`
-      );
-    }
-    return warnings;
-  }, [
-    unidentifiedFinishes.length,
-    waitingParticipants,
-    batch.timingSource,
-    closeFinishPairs,
-  ]);
-
-  const canCompleteBatch =
-    unidentifiedFinishes.length === 0 && waitingParticipants.length === 0;
-
-  const getAvailableBibsForFinish = (finishEventId: string) => {
-    return roster.filter((entry) => {
-      if (entry.finishEventId && entry.finishEventId !== finishEventId) {
-        const linked = finishMap.get(entry.finishEventId);
-        if (linked && linked.status !== 'CANCELLED') {
-          return false;
-        }
-      }
-      return true;
-    });
-  };
-
-  const handleAssignBib = async (finishEventId: string, bibEntryId: string) => {
-    setErrorMessage(null);
-    setStatusMessage(null);
-    setSelectedFinishForBib((prev) => (prev === finishEventId ? null : prev));
-    setReassignReason('');
-    setIsBusy(true);
-    try {
-      await onIdentifyFinish(
-        finishEventId,
-        bibEntryId,
-        reassignReason.trim() || undefined
-      );
-      setStatusMessage('Identifikasi nomor bib berhasil disimpan.');
-    } catch (err) {
-      setErrorMessage(
-        err instanceof Error ? err.message : 'Gagal menghubungkan nomor bib.'
-      );
-    } finally {
-      setIsBusy(false);
-    }
-  };
-
-  const handleSaveTimeCorrection = async (e: React.FormEvent) => {
-    e.preventDefault();
-    if (!correctingTimeFinish) return;
-    setErrorMessage(null);
-    setStatusMessage(null);
-
-    const parsedMs = parseElapsedString(newTimeInput);
-    if (parsedMs === null) {
-      setErrorMessage(
-        'Format waktu tidak valid. Gunakan format MM:SS.cc (contoh: 04:15.20) atau HH:MM:SS.cc.'
-      );
-      return;
-    }
-    if (!timeCorrectionReason.trim()) {
-      setErrorMessage('Alasan koreksi waktu wajib diisi untuk catatan audit.');
-      return;
-    }
-
-    setIsBusy(true);
-    try {
-      await onCorrectFinishTime(
-        correctingTimeFinish.id,
-        parsedMs,
-        timeCorrectionReason.trim()
-      );
-      setCorrectingTimeFinish(null);
-      setNewTimeInput('');
-      setTimeCorrectionReason('');
-      setStatusMessage('Koreksi waktu finish berhasil disimpan beserta log audit.');
-    } catch (err) {
-      setErrorMessage(
-        err instanceof Error ? err.message : 'Gagal mengoreksi waktu finish.'
-      );
-    } finally {
-      setIsBusy(false);
-    }
-  };
-
-  const handleBulkMarkWaiting = async (
-    targetStatus: 'DNF' | 'DNS' | 'NEEDS_REVIEW'
-  ) => {
-    setErrorMessage(null);
-    setStatusMessage(null);
-    setIsBusy(true);
-    try {
-      for (const p of waitingParticipants) {
-        await onMarkParticipantStatus(
-          p.id,
-          targetStatus,
-          `Ditandai ${targetStatus} saat peninjauan akhir batch`
+  const visibleRoster =
+    filter === 'ALL'
+      ? roster
+      : roster.filter(
+          (entry) =>
+            entry.status === 'WAITING' || entry.status === 'NEEDS_REVIEW'
         );
-      }
-      setStatusMessage(
-        `Semua sisa peserta (${waitingParticipants.length}) berhasil ditandai ${targetStatus}.`
-      );
-    } catch (err) {
-      setErrorMessage(
-        err instanceof Error ? err.message : 'Gagal menandai status peserta.'
-      );
-    } finally {
-      setIsBusy(false);
-    }
-  };
 
-  const handleConfirmCompleteBatch = async () => {
-    setConfirmCompleteOpen(false);
-    setErrorMessage(null);
-    setIsBusy(true);
+  async function perform(action: () => Promise<unknown>) {
+    setError(null);
+    setBusy(true);
     try {
-      await onCompleteBatch(completionNotes);
-    } catch (err) {
-      setErrorMessage(
-        err instanceof Error ? err.message : 'Gagal menyelesaikan batch.'
+      await action();
+    } catch (failure) {
+      setError(
+        failure instanceof Error ? failure.message : 'Perubahan gagal disimpan.'
       );
     } finally {
-      setIsBusy(false);
+      setBusy(false);
     }
-  };
+  }
 
   return (
-    <div className="screen-container screen-container--with-sticky-footer">
-      {/* Top Bar */}
-      <header className="sticky-top-bar">
-        <div className="sticky-top-bar__left">
-          <button
-            type="button"
-            className="btn btn--small btn--ghost"
-            onClick={onBackHome}
-          >
-            ← Beranda
-          </button>
-          <div>
-            <span className="sticky-top-bar__title">
-              Tinjau Hasil Batch #{batch.batchNumber}
-            </span>
-            <span className="sticky-top-bar__sub">
-              Status: {getBatchStatusLabel(batch.status, batch.recoveryRequired)}
-            </span>
-          </div>
-        </div>
-        <button
-          type="button"
-          className="btn btn--small btn--secondary"
-          onClick={() => setConfirmReopenOpen(true)}
-        >
-          Kembali ke Stopwatch
+    <div className="screen-container screen-container--with-sticky-footer review-screen">
+      <header className="page-heading">
+        <button className="btn btn--ghost" onClick={onBackHome}>
+          Kembali
         </button>
+        <div>
+          <p className="eyebrow">Periksa</p>
+          <h1 className="batch-name">{getBatchName(batch)}</h1>
+        </div>
       </header>
-
-      {/* Summary Counts */}
-      <section className="stats-grid stats-grid--5" aria-label="Ringkasan Tinjauan Batch">
-        <div className="stat-card">
-          <span className="stat-card__value">{roster.length}</span>
-          <span className="stat-card__label">Total Peserta</span>
-        </div>
-        <div className="stat-card">
-          <span className="stat-card__value">{identifiedCount}</span>
-          <span className="stat-card__label">Teridentifikasi</span>
-        </div>
-        <div
-          className={`stat-card ${
-            unidentifiedFinishes.length > 0 ? 'stat-card--alert' : ''
-          }`}
-        >
-          <span className="stat-card__value">{unidentifiedFinishes.length}</span>
-          <span className="stat-card__label">Belum Identifikasi</span>
-        </div>
-        <div
-          className={`stat-card ${
-            waitingParticipants.length > 0 ? 'stat-card--alert' : ''
-          }`}
-        >
-          <span className="stat-card__value">{waitingParticipants.length}</span>
-          <span className="stat-card__label">Belum Finish</span>
-        </div>
-        <div className="stat-card">
-          <span className="stat-card__value">
-            {specialStatusParticipants.length + needsReviewFinishes.length}
-          </span>
-          <span className="stat-card__label">DNS / DNF / Cek</span>
-        </div>
-      </section>
-
-      {/* Data Quality Warnings */}
-      {dataQualityWarnings.length > 0 ? (
-        <section className="card warning-card" aria-label="Peringatan Kualitas Data">
-          <h2 className="section-title">Perhatian Sebelum Menyelesaikan Batch</h2>
-          <ul className="warning-list">
-            {dataQualityWarnings.map((w, idx) => (
-              <li key={idx}>{w}</li>
-            ))}
-          </ul>
-        </section>
-      ) : (
-        <section className="card success-card" role="status">
-          <strong>✓ Semua catatan finish dan peserta sudah memiliki status jelas.</strong>{' '}
-          Batch #{batch.batchNumber} siap diselesaikan.
-        </section>
-      )}
-
-      {errorMessage && (
-        <div className="inline-alert inline-alert--error" role="alert">
-          {errorMessage}
-        </div>
-      )}
-
-      {statusMessage && (
-        <div className="inline-alert inline-alert--success" role="status">
-          {statusMessage}
-        </div>
-      )}
-
-      {/* Section 1: Finish Events Review & Identification */}
-      <section className="card" aria-label="Daftar Catatan Waktu Finish">
-        <h2 className="section-title">
-          1. Catatan Waktu Finish ({orderedFinishEvents.length})
-        </h2>
-        {orderedFinishEvents.length === 0 ? (
-          <div className="empty-state">
-            Tidak ada catatan waktu finish pada batch ini.
-          </div>
-        ) : (
-          <ul className="finish-queue-list">
-            {orderedFinishEvents.map((fin) => {
-              const assignedBib = fin.batchBibEntryId
-                ? bibMap.get(fin.batchBibEntryId)
-                : undefined;
-              const isSelectingBib = selectedFinishForBib === fin.id;
-              const isCorrectingTime = correctingTimeFinish?.id === fin.id;
-              const availableBibs = isSelectingBib
-                ? getAvailableBibsForFinish(fin.id)
-                : [];
-
-              return (
-                <li
-                  key={fin.id}
-                  className={`finish-queue-item finish-queue-item--${fin.status.toLowerCase()}`}
-                >
-                  <div className="finish-queue-item__main">
-                    <div className="finish-queue-item__left">
-                      <span className="finish-seq-badge">
-                        {formatSequenceLabel(fin.sequence)}
-                      </span>
-                      <div>
-                        <div className="finish-elapsed-time">
-                          {formatElapsedMs(fin.elapsedMs)}
-                        </div>
-                        <div className="finish-wall-time">
-                          Jam: {formatWallClockTime(fin.recordedAtWallClock)}
-                          {fin.correctionHistory.length > 0 && (
-                            <span className="audit-tag">
-                              • {fin.correctionHistory.length}x dikoreksi
-                            </span>
-                          )}
-                        </div>
-                      </div>
-                    </div>
-
-                    <div className="finish-queue-item__right">
-                      {assignedBib ? (
-                        <BibBadge
-                          color={assignedBib.bibColor}
-                          number={assignedBib.bibNumber}
-                          size="md"
-                        />
-                      ) : (
-                        <span
-                          className={`status-badge status-badge--${fin.status.toLowerCase()}`}
-                        >
-                          {getFinishEventStatusLabel(fin.status)}
-                        </span>
-                      )}
-
-                      {fin.status !== 'CANCELLED' && (
-                        <div className="finish-review-btn-group">
-                          <button
-                            type="button"
-                            className="btn btn--small btn--primary"
-                            onClick={() => {
-                              setSelectedFinishForBib(isSelectingBib ? null : fin.id);
-                              setReassignReason('');
-                            }}
-                          >
-                            {assignedBib ? 'Ganti Nomor' : 'Pilih Nomor'}
-                          </button>
-                          <button
-                            type="button"
-                            className="btn btn--small btn--secondary"
-                            onClick={() => {
-                              if (isCorrectingTime) {
-                                setCorrectingTimeFinish(null);
-                              } else {
-                                setCorrectingTimeFinish(fin);
-                                setNewTimeInput(formatElapsedMs(fin.elapsedMs));
-                                setTimeCorrectionReason('');
-                              }
-                            }}
-                          >
-                            Koreksi Waktu
-                          </button>
-                        </div>
-                      )}
-                    </div>
-                  </div>
-
-                  {/* Inline Bib Selection / Reassignment */}
-                  {isSelectingBib && (
-                    <div className="inline-identify-drawer">
-                      <div className="inline-identify-drawer__header">
-                        <strong>
-                          Hubungkan {formatSequenceLabel(fin.sequence)} ke Nomor Bib:
-                        </strong>
-                      </div>
-                      {assignedBib && (
-                        <div className="form-group">
-                          <label className="field-label">
-                            Alasan koreksi nomor bib (opsional, dicatat di audit):
-                          </label>
-                          <input
-                            type="text"
-                            className="text-input text-input--compact"
-                            placeholder="Misal: Tertukar urutan saat finish"
-                            value={reassignReason}
-                            onChange={(e) => setReassignReason(e.target.value)}
-                          />
-                        </div>
-                      )}
-                      {availableBibs.length === 0 ? (
-                        <p className="helper-text">
-                          Semua peserta sudah terhubung ke waktu finish lain. Lepaskan salah satu peserta terlebih dahulu jika ingin menukar.
-                        </p>
-                      ) : (
-                        <div className="identify-bib-grid">
-                          {availableBibs.map((entry) => (
-                            <button
-                              key={entry.id}
-                              type="button"
-                              className="identify-bib-choice"
-                              disabled={isBusy}
-                              onClick={() => void handleAssignBib(fin.id, entry.id)}
-                            >
-                              <BibBadge
-                                color={entry.bibColor}
-                                number={entry.bibNumber}
-                                size="md"
-                              />
-                              <span className="identify-bib-choice__status">
-                                {getParticipantStatusLabel(entry.status)}
-                              </span>
-                            </button>
-                          ))}
-                        </div>
-                      )}
-
-                      <div className="inline-identify-drawer__footer">
-                        {assignedBib && (
-                          <button
-                            type="button"
-                            className="btn btn--small btn--secondary"
-                            onClick={() => {
-                              void onUnassignOrMarkFinish(
-                                fin.id,
-                                'UNIDENTIFIED',
-                                reassignReason || 'Melepaskan nomor bib saat tinjauan'
-                              );
-                              setSelectedFinishForBib(null);
-                            }}
-                          >
-                            Lepaskan Nomor {assignedBib.bibLabel}
-                          </button>
-                        )}
-                        <button
-                          type="button"
-                          className="btn btn--small btn--warning"
-                          onClick={() => {
-                            void onUnassignOrMarkFinish(
-                              fin.id,
-                              'NEEDS_REVIEW',
-                              reassignReason || 'Ditandai Perlu Diperiksa saat tinjauan'
-                            );
-                            setSelectedFinishForBib(null);
-                          }}
-                        >
-                          Tandai Perlu Diperiksa
-                        </button>
-                        <button
-                          type="button"
-                          className="btn btn--small btn--danger-outline"
-                          onClick={() => {
-                            void onCancelFinish(
-                              fin.id,
-                              reassignReason || 'Dibatalkan saat tinjauan batch'
-                            );
-                            setSelectedFinishForBib(null);
-                          }}
-                        >
-                          Batalkan Finish Ini
-                        </button>
-                      </div>
-                    </div>
-                  )}
-
-                  {/* Inline Timestamp Correction Form */}
-                  {isCorrectingTime && (
-                    <form
-                      onSubmit={handleSaveTimeCorrection}
-                      className="inline-identify-drawer"
-                    >
-                      <h4>
-                        Koreksi Waktu Tempuh {formatSequenceLabel(fin.sequence)} (Tercatat di Audit)
-                      </h4>
-                      <div className="roster-edit-row">
-                        <div>
-                          <label className="field-label">
-                            Waktu Baru (MM:SS.cc):
-                          </label>
-                          <input
-                            type="text"
-                            className="text-input"
-                            value={newTimeInput}
-                            onChange={(e) => setNewTimeInput(e.target.value)}
-                            placeholder="05:12.34"
-                          />
-                        </div>
-                        <div>
-                          <label className="field-label">
-                            Alasan Koreksi (Wajib):
-                          </label>
-                          <input
-                            type="text"
-                            className="text-input"
-                            value={timeCorrectionReason}
-                            onChange={(e) => setTimeCorrectionReason(e.target.value)}
-                            placeholder="Misal: Terlambat menekan tombol"
-                            required
-                          />
-                        </div>
-                      </div>
-                      <div className="roster-edit-actions">
-                        <button
-                          type="button"
-                          className="btn btn--small btn--secondary"
-                          onClick={() => setCorrectingTimeFinish(null)}
-                        >
-                          Batal
-                        </button>
-                        <button
-                          type="submit"
-                          className="btn btn--small btn--primary"
-                          disabled={isBusy}
-                        >
-                          Simpan Koreksi Waktu
-                        </button>
-                      </div>
-                    </form>
-                  )}
-                </li>
-              );
-            })}
-          </ul>
+      <section className="review-overview">
+        <strong>
+          {unresolved === 0
+            ? 'Semua peserta sudah memiliki status.'
+            : `${unresolved} catatan perlu keputusanmu.`}
+        </strong>
+        <p>
+          {unidentified.length} finish belum diisi bib · {waiting.length}{' '}
+          peserta belum memiliki hasil
+        </p>
+        {batch.timingSource === 'WALL_CLOCK_FALLBACK' && (
+          <p className="inline-alert inline-alert--warning">
+            Sesi ini menggunakan pemulihan jam perangkat.
+          </p>
+        )}
+        {closeIds.size > 0 && (
+          <p className="helper-text">
+            Ada ketukan berjarak 800 ms atau kurang. Periksa urutan jika
+            diperlukan.
+          </p>
         )}
       </section>
-
-      {/* Section 2: Roster & Participant Statuses (DNS / DNF / NEEDS_REVIEW) */}
-      <section className="card" aria-label="Status Semua Peserta Batch">
-        <div className="section-header-row">
-          <h2 className="section-title">
-            2. Status Peserta ({roster.length} Peserta)
-          </h2>
-          {waitingParticipants.length > 0 && (
-            <div className="bulk-status-actions">
-              <button
-                type="button"
-                className="btn btn--small btn--secondary"
-                disabled={isBusy}
-                onClick={() => void handleBulkMarkWaiting('DNF')}
-              >
-                Tandai Semua Sisa ({waitingParticipants.length}) DNF
-              </button>
-              <button
-                type="button"
-                className="btn btn--small btn--ghost"
-                disabled={isBusy}
-                onClick={() => void handleBulkMarkWaiting('DNS')}
-              >
-                Tandai Sisa DNS
-              </button>
-            </div>
-          )}
-        </div>
-
-        <ul className="roster-list">
-          {roster.map((entry) => {
-            const linkedFinish = entry.finishEventId
-              ? finishMap.get(entry.finishEventId)
-              : undefined;
+      {error && (
+        <p role="alert" className="inline-alert inline-alert--error">
+          {error}
+        </p>
+      )}
+      <div className="segmented-toggle">
+        <button
+          className={`segmented-btn ${filter === 'ISSUES' ? 'segmented-btn--active' : ''}`}
+          aria-pressed={filter === 'ISSUES'}
+          onClick={() => setFilter('ISSUES')}
+        >
+          Perlu perhatian
+        </button>
+        <button
+          className={`segmented-btn ${filter === 'ALL' ? 'segmented-btn--active' : ''}`}
+          aria-pressed={filter === 'ALL'}
+          onClick={() => setFilter('ALL')}
+        >
+          Semua hasil
+        </button>
+      </div>
+      <section className="review-finishes">
+        <h2>Catatan finish</h2>
+        {!visible.length && (
+          <p className="empty-state">
+            {filter === 'ISSUES'
+              ? 'Catatan finish sudah diperiksa.'
+              : 'Belum ada catatan finish.'}
+          </p>
+        )}
+        <ul className="review-finish-list">
+          {visible.map((finish) => {
+            const bib = roster.find(
+              (entry) => entry.id === finish.batchBibEntryId
+            );
             return (
-              <li key={entry.id} className="roster-item">
-                <div className="roster-item__content">
-                  <div className="roster-item__left">
-                    <BibBadge
-                      color={entry.bibColor}
-                      number={entry.bibNumber}
-                      size="md"
-                    />
-                    <div>
-                      <div className="roster-item__status-line">
-                        <span
-                          className={`status-badge status-badge--${entry.status.toLowerCase()}`}
-                        >
-                          {getParticipantStatusLabel(entry.status)}
-                        </span>
-                        {linkedFinish && (
-                          <span className="roster-item__time-badge">
-                            {formatSequenceLabel(linkedFinish.sequence)} •{' '}
-                            <strong>{formatElapsedMs(linkedFinish.elapsedMs)}</strong>
-                          </span>
-                        )}
-                      </div>
-                      {entry.participantName && (
-                        <div className="roster-item__name">
-                          {entry.participantName}
-                        </div>
-                      )}
-                    </div>
+              <li key={finish.id} className="card review-finish">
+                <div className="section-header-row">
+                  <div>
+                    <span className="eyebrow">
+                      {formatSequenceLabel(finish.sequence)}
+                    </span>
+                    <h3>{formatElapsedMs(finish.elapsedMs)}</h3>
                   </div>
-
-                  <div className="participant-status-controls">
-                    <button
-                      type="button"
-                      className={`btn btn--small ${
-                        entry.status === 'DNS' ? 'btn--warning' : 'btn--ghost'
-                      }`}
-                      onClick={() =>
-                        void onMarkParticipantStatus(
-                          entry.id,
-                          'DNS',
-                          'Ditandai DNS oleh operator'
-                        )
-                      }
+                  {bib ? (
+                    <BibBadge
+                      color={bib.bibColor}
+                      number={bib.bibNumber}
+                      size="sm"
+                    />
+                  ) : (
+                    <span className="status-badge">
+                      {finish.status === 'CANCELLED'
+                        ? 'Dibatalkan'
+                        : finish.status === 'NEEDS_REVIEW'
+                          ? 'Perlu diperiksa'
+                          : 'Belum isi bib'}
+                    </span>
+                  )}
+                </div>
+                {closeIds.has(finish.id) && (
+                  <p className="helper-text">
+                    Ketukan berdekatan dengan finish lain.
+                  </p>
+                )}
+                {finish.status !== 'CANCELLED' && (
+                  <>
+                    <label
+                      className="field-label"
+                      htmlFor={`assign-${finish.id}`}
                     >
-                      DNS
-                    </button>
-                    <button
-                      type="button"
-                      className={`btn btn--small ${
-                        entry.status === 'DNF' ? 'btn--warning' : 'btn--ghost'
-                      }`}
-                      onClick={() =>
-                        void onMarkParticipantStatus(
-                          entry.id,
-                          'DNF',
-                          'Ditandai DNF oleh operator'
-                        )
-                      }
+                      Bib peserta
+                    </label>
+                    <select
+                      className="select-input"
+                      id={`assign-${finish.id}`}
+                      value={finish.batchBibEntryId ?? ''}
+                      disabled={busy}
+                      onChange={(event) => {
+                        if (event.target.value)
+                          void perform(() =>
+                            onIdentifyFinish(
+                              finish.id,
+                              event.target.value,
+                              bib
+                                ? 'Koreksi bib melalui pemeriksaan hasil'
+                                : undefined
+                            )
+                          );
+                      }}
                     >
-                      DNF
-                    </button>
-                    <button
-                      type="button"
-                      className={`btn btn--small ${
-                        entry.status === 'NEEDS_REVIEW'
-                          ? 'btn--warning'
-                          : 'btn--ghost'
-                      }`}
-                      onClick={() =>
-                        void onMarkParticipantStatus(
-                          entry.id,
-                          'NEEDS_REVIEW',
-                          'Ditandai Perlu Diperiksa oleh operator'
+                      <option value="">Pilih bib</option>
+                      {roster
+                        .filter(
+                          (entry) =>
+                            !entry.finishEventId ||
+                            entry.finishEventId === finish.id
                         )
-                      }
-                    >
-                      Perlu Cek
-                    </button>
-                    {entry.status !== 'WAITING' && entry.status !== 'FINISHED' && (
+                        .map((entry) => (
+                          <option key={entry.id} value={entry.id}>
+                            {entry.bibLabel} {entry.participantName}
+                          </option>
+                        ))}
+                    </select>
+                    <div className="button-row">
                       <button
-                        type="button"
                         className="btn btn--small btn--secondary"
+                        onClick={() => {
+                          setEditing(finish);
+                          setTime(formatElapsedMs(finish.elapsedMs));
+                          setReason('');
+                        }}
+                      >
+                        Koreksi waktu
+                      </button>
+                      <button
+                        className="btn btn--small btn--ghost"
+                        disabled={busy}
                         onClick={() =>
-                          void onMarkParticipantStatus(
-                            entry.id,
-                            'WAITING',
-                            'Dikembalikan ke status Belum Finish'
+                          void perform(() =>
+                            onUnassignOrMarkFinish(
+                              finish.id,
+                              'NEEDS_REVIEW',
+                              'Operator meminta pemeriksaan ulang'
+                            )
                           )
                         }
                       >
-                        Reset
+                        Perlu diperiksa
                       </button>
-                    )}
-                  </div>
-                </div>
+                    </div>
+                    <details>
+                      <summary>Koreksi identitas atau batalkan</summary>
+                      <form
+                        onSubmit={(event) => {
+                          event.preventDefault();
+                          const form = new FormData(event.currentTarget);
+                          const action = (
+                            event.nativeEvent as SubmitEvent
+                          ).submitter?.getAttribute('value');
+                          void perform(() =>
+                            action === 'cancel'
+                              ? onCancelFinish(
+                                  finish.id,
+                                  String(form.get('reason'))
+                                )
+                              : onUnassignOrMarkFinish(
+                                  finish.id,
+                                  'UNIDENTIFIED',
+                                  String(form.get('reason'))
+                                )
+                          );
+                        }}
+                      >
+                        <label
+                          className="field-label"
+                          htmlFor={`reason-${finish.id}`}
+                        >
+                          Alasan koreksi
+                        </label>
+                        <input
+                          className="text-input"
+                          id={`reason-${finish.id}`}
+                          name="reason"
+                          required
+                        />
+                        <div className="button-row">
+                          <button
+                            className="btn btn--secondary"
+                            value="unassign"
+                            disabled={busy}
+                          >
+                            Lepas bib
+                          </button>
+                          <button
+                            className="btn btn--danger-outline"
+                            value="cancel"
+                            disabled={busy}
+                          >
+                            Batalkan catatan
+                          </button>
+                        </div>
+                      </form>
+                    </details>
+                  </>
+                )}
               </li>
             );
           })}
         </ul>
       </section>
-
-      {/* Notes before completing */}
-      <section className="card" aria-label="Catatan Penutup Batch">
-        <label htmlFor="batch-notes-input" className="field-label">
-          Catatan Batch #{batch.batchNumber} (Opsional):
+      <section>
+        <div className="section-header-row">
+          <h2>Status peserta</h2>
+          {waiting.length > 0 && (
+            <div className="button-row">
+              {(['DNF', 'DNS'] as const).map((status) => (
+                <button
+                  key={status}
+                  className="btn btn--small btn--secondary"
+                  disabled={busy}
+                  onClick={() => {
+                    setBulkIds(waiting.map((entry) => entry.id));
+                    setConfirm(status);
+                  }}
+                >
+                  Tandai sisa {status}
+                </button>
+              ))}
+            </div>
+          )}
+        </div>
+        {!visibleRoster.length && (
+          <p className="empty-state">Status peserta sudah lengkap.</p>
+        )}
+        <ul className="roster-list">
+          {visibleRoster.map((entry) => (
+            <li key={entry.id} className="roster-item">
+              <div className="roster-item__content">
+                <BibBadge
+                  color={entry.bibColor}
+                  number={entry.bibNumber}
+                  size="sm"
+                />
+                <label className="status-select">
+                  <span>{entry.participantName || 'Status peserta'}</span>
+                  <select
+                    className="select-input"
+                    value={entry.status}
+                    disabled={busy || entry.status === 'FINISHED'}
+                    onChange={(event) =>
+                      void perform(() =>
+                        onMarkParticipantStatus(
+                          entry.id,
+                          event.target.value as Exclude<
+                            ParticipantStatus,
+                            'FINISHED'
+                          >,
+                          'Operator memeriksa status peserta'
+                        )
+                      )
+                    }
+                  >
+                    {(
+                      [
+                        'WAITING',
+                        'FINISHED',
+                        'DNS',
+                        'DNF',
+                        'NEEDS_REVIEW',
+                      ] as const
+                    ).map((status) => (
+                      <option
+                        key={status}
+                        value={status}
+                        disabled={status === 'FINISHED'}
+                      >
+                        {getParticipantStatusLabel(status)}
+                      </option>
+                    ))}
+                  </select>
+                </label>
+              </div>
+            </li>
+          ))}
+        </ul>
+      </section>
+      <section>
+        <label className="field-label" htmlFor="review-notes">
+          Catatan gelombang (opsional)
         </label>
-        <input
-          id="batch-notes-input"
-          type="text"
+        <textarea
           className="text-input"
-          placeholder="Contoh: Cuaca cerah, 1 peserta DNF di putaran akhir"
-          value={completionNotes}
-          onChange={(e) => setCompletionNotes(e.target.value)}
+          id="review-notes"
+          rows={3}
+          value={notes}
+          onChange={(event) => setNotes(event.target.value)}
         />
       </section>
-
-      {/* Bottom Sticky Complete Action */}
+      <button className="btn btn--ghost" onClick={() => setConfirm('reopen')}>
+        Kembali ke stopwatch
+      </button>
       <div className="sticky-bottom-bar">
-        <div className="sticky-bottom-bar__summary">
-          <span>
-            {canCompleteBatch
-              ? 'Semua data siap diselesaikan'
-              : `${unidentifiedFinishes.length} finish belum identifikasi • ${waitingParticipants.length} peserta belum berstatus`}
-          </span>
-        </div>
+        <p className="helper-text">
+          {unresolved > 0
+            ? 'Hasil tertunda akan ditandai untuk diperiksa.'
+            : 'Hasil disimpan bersama riwayat koreksinya.'}
+        </p>
         <button
-          type="button"
           className="btn btn--primary btn--large btn--block"
-          disabled={!canCompleteBatch || isBusy}
-          onClick={() => setConfirmCompleteOpen(true)}
+          disabled={busy}
+          onClick={() => setConfirm(unresolved ? 'defer' : 'complete')}
         >
-          Selesaikan Batch #{batch.batchNumber}
+          {unresolved ? 'Simpan untuk diperiksa' : 'Simpan dan lanjutkan'}
         </button>
       </div>
-
-      {/* Confirm Complete Batch */}
       <ConfirmDialog
-        open={confirmCompleteOpen}
-        title={`Selesaikan & Kunci Batch #${batch.batchNumber}?`}
+        open={confirm !== null}
+        title={
+          confirm === 'reopen'
+            ? 'Kembali ke pencatatan?'
+            : confirm === 'DNS' || confirm === 'DNF'
+              ? `Tandai ${bulkIds.length} peserta ${confirm}?`
+              : 'Simpan gelombang ini?'
+        }
         description={
-          <div>
+          confirm === 'DNS' || confirm === 'DNF' ? (
+            <>
+              <p>Peserta yang akan diubah</p>
+              <div className="selected-bib-strip">
+                {roster
+                  .filter((entry) => bulkIds.includes(entry.id))
+                  .map((entry) => (
+                    <BibBadge
+                      key={entry.id}
+                      color={entry.bibColor}
+                      number={entry.bibNumber}
+                      size="sm"
+                    />
+                  ))}
+              </div>
+            </>
+          ) : (
             <p>
-              Batch #{batch.batchNumber} akan ditandai selesai dan disimpan ke riwayat hasil.
+              {confirm === 'defer'
+                ? `${unidentified.length} finish dan ${waiting.length} peserta akan ditandai Perlu diperiksa. Kamu dapat melanjutkan gelombang berikutnya.`
+                : confirm === 'reopen'
+                  ? 'Sumber waktu akan diperiksa sebelum pencatatan dilanjutkan.'
+                  : 'Hasil gelombang akan tersedia di riwayat.'}
             </p>
-            <ul className="dialog-summary-list">
-              <li>Finish Teridentifikasi: {identifiedCount} peserta</li>
-              <li>DNS / DNF / Perlu Cek: {specialStatusParticipants.length} peserta</li>
-            </ul>
-            <p className="helper-text">
-              Anda tetap dapat mengekspor CSV atau melakukan koreksi teraudit dari menu Lihat Hasil kapan saja.
-            </p>
-          </div>
+          )
         }
-        confirmLabel="Ya, Selesaikan Batch"
-        cancelLabel="Batal"
-        variant="primary"
-        onConfirm={() => void handleConfirmCompleteBatch()}
-        onCancel={() => setConfirmCompleteOpen(false)}
-      />
-
-      {/* Confirm Reopen Batch */}
-      <ConfirmDialog
-        open={confirmReopenOpen}
-        title={`Kembalikan Batch #${batch.batchNumber} ke Layar Stopwatch?`}
-        description={
-          <p>
-            Batch akan kembali ke layar pencatatan finish (RUNNING). Semua waktu finish yang sudah tercatat tetap aman.
-          </p>
-        }
-        confirmLabel="Kembali ke Stopwatch"
-        cancelLabel="Batal"
-        variant="warning"
-        onConfirm={() => {
-          setConfirmReopenOpen(false);
-          void onReturnToRunning();
+        confirmLabel={confirm === 'reopen' ? 'Buka stopwatch' : 'Konfirmasi'}
+        onCancel={() => setConfirm(null)}
+        onConfirm={async () => {
+          if (confirm === 'reopen') await onReturnToRunning();
+          else if (confirm === 'DNS' || confirm === 'DNF')
+            await onBulkMarkWaiting(bulkIds, confirm);
+          else if (confirm === 'defer') await onDeferReview(notes);
+          else await onCompleteBatch(notes);
+          setConfirm(null);
         }}
-        onCancel={() => setConfirmReopenOpen(false)}
+      />
+      <ConfirmDialog
+        open={Boolean(editing)}
+        title="Koreksi waktu finish"
+        description={
+          <>
+            <label className="field-label" htmlFor="correct-time">
+              Waktu (MM:SS.cc)
+            </label>
+            <input
+              id="correct-time"
+              className="text-input"
+              value={time}
+              onChange={(event) => setTime(event.target.value)}
+            />
+            <label className="field-label" htmlFor="correct-reason">
+              Alasan koreksi
+            </label>
+            <input
+              id="correct-reason"
+              className="text-input"
+              value={reason}
+              onChange={(event) => setReason(event.target.value)}
+            />
+          </>
+        }
+        confirmLabel="Simpan koreksi"
+        onCancel={() => setEditing(null)}
+        onConfirm={async () => {
+          const milliseconds = parseElapsedString(time);
+          if (milliseconds === null || !reason.trim())
+            throw new Error('Isi waktu yang valid dan alasan koreksi.');
+          if (editing)
+            await onCorrectFinishTime(editing.id, milliseconds, reason.trim());
+          setEditing(null);
+        }}
       />
     </div>
   );
-};
+}

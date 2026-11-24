@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { render, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import ExcelJS from 'exceljs';
@@ -18,6 +18,10 @@ import { App } from '../App';
 import { clearActiveSessionBatchesForTests } from '../services/timekeeper';
 
 describe('Additional Export Methods: Excel (.xlsx), PDF (.pdf), Data Integrity & UI', () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+    vi.unstubAllGlobals();
+  });
   beforeEach(async () => {
     setSimulatedWriteFailure(null);
     clearActiveSessionBatchesForTests();
@@ -257,8 +261,14 @@ describe('Additional Export Methods: Excel (.xlsx), PDF (.pdf), Data Integrity &
   });
 
   it('detects inconsistent participant/finish references and flags them for review without modifying stored IndexedDB records', async () => {
-    const event = await EventRepository.createEvent('Uji Integritas Data', '2026-10-22');
-    const batch = await BatchRepository.createBatch(event.id, 'TIMESTAMP_FIRST');
+    const event = await EventRepository.createEvent(
+      'Uji Integritas Data',
+      '2026-10-22'
+    );
+    const batch = await BatchRepository.createBatch(
+      event.id,
+      'TIMESTAMP_FIRST'
+    );
     const entryBrokenRef = await BatchRepository.addBibToBatch({
       batchId: batch.id,
       bibColor: 'YELLOW',
@@ -317,7 +327,10 @@ describe('Additional Export Methods: Excel (.xlsx), PDF (.pdf), Data Integrity &
   });
 
   it('handles large result sets (60 participants) across multiple PDF pages and renders all 4 export options in the UI', async () => {
-    const event = await EventRepository.createEvent('Maraton Besar', '2026-11-01');
+    const event = await EventRepository.createEvent(
+      'Maraton Besar',
+      '2026-11-01'
+    );
     const batch1 = await BatchRepository.createBatch(event.id, 'DIRECT_CARD');
 
     // Add 35 bibs in Batch 1
@@ -382,10 +395,24 @@ describe('Additional Export Methods: Excel (.xlsx), PDF (.pdf), Data Integrity &
     expect(pdfText).toContain('Halaman 2 dari');
 
     // Render UI and test all 4 export options
+    const createObjectURL = vi.fn(() => 'blob:timex-export');
+    vi.stubGlobal(
+      'URL',
+      Object.assign(class extends URL {}, {
+        createObjectURL,
+        revokeObjectURL: vi.fn(),
+      })
+    );
+    const downloadedNames: string[] = [];
+    vi.spyOn(HTMLAnchorElement.prototype, 'click').mockImplementation(function (
+      this: HTMLAnchorElement
+    ) {
+      downloadedNames.push(this.download);
+    });
     const user = userEvent.setup();
     render(<App />);
 
-    await user.click(await screen.findByRole('button', { name: /Ekspor\/Backup/i }));
+    await user.click(await screen.findByRole('button', { name: 'Perangkat' }));
 
     // Verify all 4 options and their descriptions are visible
     expect(
@@ -439,5 +466,12 @@ describe('Additional Export Methods: Excel (.xlsx), PDF (.pdf), Data Integrity &
         /File Backup JSON .*\.json.* berhasil diunduh/i
       );
     });
+    expect(createObjectURL).toHaveBeenCalledTimes(4);
+    expect(downloadedNames).toEqual([
+      expect.stringMatching(/\.xlsx$/),
+      expect.stringMatching(/\.pdf$/),
+      expect.stringMatching(/\.csv$/),
+      expect.stringMatching(/\.json$/),
+    ]);
   });
 });
